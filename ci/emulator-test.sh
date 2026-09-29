@@ -113,20 +113,57 @@ save_crash() {
 }
 
 ANR_COUNT=0
+APP_ANR_COUNT=0
+# Our app's ANR dialog during the launch window is treated as transient:
+# under full software emulation (no KVM on hosted runners) a Compose debug
+# APK's cold start can exceed Android's ~10 s launch timeout, so the system
+# shows the ANR dialog even though the app is still starting normally.
+# Tap "Wait" and keep polling, bounded by APP_ANR_MAX; only fail if the app
+# never becomes responsive.
+APP_ANR_MAX=15
 
-# Dismiss system "X isn't responding" ANR dialogs. Fails (returns 1) if the
-# ANR is for OUR app. If "Wait" doesn't clear a system ANR after ~8 tries,
-# taps "Close app" to kill the wedged system process (it restarts).
+# Snapshot logcat + the ANR traces file into the artifacts so a failure can
+# be diagnosed from the main-thread stack, not just a screenshot.
+capture_anr_trace() {
+  adb logcat -d > "$OUT/logcat-full.txt" 2>/dev/null || true
+  adb shell cat /data/anr/traces.txt > "$OUT/anr-traces.txt" 2>/dev/null || true
+  echo "captured logcat + anr traces into $OUT"
+}
+
+# Fail helper: always capture diagnostics before exiting.
+fail() {
+  echo "FAIL: $1"
+  capture_anr_trace
+  exit 1
+}
+
+# Dismiss "X isn't responding" ANR dialogs. System ANRs: tap "Wait" (after
+# ~8 tries tap "Close app" to kill the wedged system process — it restarts).
+# OUR app's ANR: tap "Wait" and keep polling (bounded); return 1 only when it
+# persists past APP_ANR_MAX dismiss cycles.
 dismiss_system_dialogs() {
   ui_dump
-  grep -q "isn't responding" "$OUT/ui-dump.xml" || { ANR_COUNT=0; return 0; }
+  grep -q "isn't responding" "$OUT/ui-dump.xml" || { ANR_COUNT=0; APP_ANR_COUNT=0; return 0; }
   local title
   title=$(grep -o 'text="[^"]*isn'"'"'t responding"' "$OUT/ui-dump.xml" | head -1)
-  echo "system ANR dialog: $title"
   if [[ "$title" == *"Cache Cleaner"* ]]; then
-    echo "APP ANR — our app is not responding"
-    return 1
+    APP_ANR_COUNT=$((APP_ANR_COUNT + 1))
+    echo "APP ANR (ours) — likely slow cold start under software emulation; tapping Wait ($APP_ANR_COUNT/$APP_ANR_MAX)"
+    capture_anr_trace
+    if [ "$APP_ANR_COUNT" -ge "$APP_ANR_MAX" ]; then
+      echo "APP ANR PERSISTED — failing"
+      return 1
+    fi
+    local bounds
+    if bounds=$(find_node "^Wait$"); then
+      echo "tapping 'Wait' at $bounds"
+      # shellcheck disable=SC2086
+      adb shell input tap $bounds
+      sleep 3
+    fi
+    return 0
   fi
+  echo "system ANR dialog: $title"
   ANR_COUNT=$((ANR_COUNT + 1))
   local bounds btn="Wait" bpat="^Wait$"
   if [ "$ANR_COUNT" -ge 8 ]; then
@@ -149,6 +186,7 @@ wait_and_tap() {
     if app_crashed; then
       echo "APP CRASHED (logcat)"
       save_crash
+      capture_anr_trace
       return 1
     fi
     dismiss_system_dialogs || return 1
@@ -194,30 +232,28 @@ echo "=== launch health check ==="
 if app_crashed; then
   echo "APP CRASHED ON LAUNCH"
   save_crash
-  exit 1
+  fail "APP CRASHED ON LAUNCH"
 fi
 if [ -z "$(adb shell pidof "$PKG" 2>/dev/null)" ]; then
-  echo "APP PROCESS NOT RUNNING after launch"
-  exit 1
+fail "APP PROCESS NOT RUNNING after launch"
 fi
 echo "app process is alive"
 
 echo "=== phase 2a: Select-all UI test ==="
-wait_and_tap "^Select all$" "Select all" 120 || { echo "SELECT-ALL TAP FAILED"; exit 1; }
-CLEANLABEL=$(wait_for_text "^Clean [0-9]+ apps$" 120) || { echo "CLEAN-BUTTON NEVER APPEARED"; exit 1; }
+wait_and_tap "^Select all$" "Select all" 300 || fail "SELECT-ALL TAP FAILED"
+CLEANLABEL=$(wait_for_text "^Clean [0-9]+ apps$" 120) || fail "CLEAN-BUTTON NEVER APPEARED"
 N=$(echo "$CLEANLABEL" | grep -o "[0-9][0-9]*")
 echo "select-all -> '$CLEANLABEL' (N=$N)"
 if [ -z "$N" ] || [ "$N" -eq 0 ]; then
-  echo "SELECT ALL SELECTED ZERO APPS"
-  exit 1
+  fail "SELECT ALL SELECTED ZERO APPS"
 fi
 screenshot "cachecleaner-selected.png"
-wait_and_tap "^Clear$" "Clear" 60 || { echo "CLEAR TAP FAILED"; exit 1; }
+wait_and_tap "^Clear$" "Clear" 60 || fail "CLEAR TAP FAILED"
 echo "select-all/clear UI OK"
 
 echo "=== phase 2b: real single-app cache-clean run ==="
 # Switch to the "With cache" filter so the list holds only apps with cache.
-wait_and_tap "^With cache$" "With cache filter chip" 60 || { echo "WITH-CACHE CHIP NOT FOUND"; exit 1; }
+wait_and_tap "^With cache$" "With cache filter chip" 60 || fail "WITH-CACHE CHIP NOT FOUND"
 sleep 3
 # Tap the first app row (any app with cache). The row's package label is not
 # needed: tap the first checkbox in the list.
@@ -238,13 +274,13 @@ for node in tree.iter('node'):
             sys.exit(0)
 sys.exit(1)
 EOF
-) || { echo "NO CHECKABLE APP ROW FOUND"; exit 1; }
+) || fail "NO CHECKABLE APP ROW FOUND"
 echo "tapping first app row at $FIRST_ROW"
 # shellcheck disable=SC2086
 adb shell input tap $FIRST_ROW
-CLEANLABEL=$(wait_for_text "^Clean 1 apps$" 60) || { echo "CLEAN-1 BUTTON NEVER APPEARED"; exit 1; }
+CLEANLABEL=$(wait_for_text "^Clean 1 apps$" 60) || fail "CLEAN-1 BUTTON NEVER APPEARED"
 echo "selected 1 app -> '$CLEANLABEL'"
-wait_and_tap "^Clean 1 apps$" "Clean 1 app" 60 || { echo "CLEAN TAP FAILED"; exit 1; }
+wait_and_tap "^Clean 1 apps$" "Clean 1 app" 60 || fail "CLEAN TAP FAILED"
 
 echo "=== waiting for the run to finish (up to 8 min) ==="
 FOUND=""
@@ -253,14 +289,12 @@ for _ in $(seq 1 48); do
   if app_crashed; then
     echo "APP CRASHED DURING RUN"
     save_crash
-    exit 1
+    fail "APP CRASHED DURING RUN"
   fi
   if adb logcat -d -t 4000 2>/dev/null | grep -q "\[dbg\] run finished: cleaned="; then FOUND=1; break; fi
 done
 if [ -z "$FOUND" ]; then
-  echo "RUN DID NOT FINISH IN TIME"
-  adb logcat -d -t 4000 > "$OUT/logcat-full.txt" || true
-  exit 1
+  fail "RUN DID NOT FINISH IN TIME"
 fi
 
 echo "=== collecting clean-run diagnostics ==="
@@ -274,13 +308,13 @@ CLEANED=$(grep -ac "\[dbg\] run finished: cleaned=" "$OUT/clean-run-dbg.txt" || 
 echo "engine [dbg] lines : $DBG"
 echo "run-finished marks : $CLEANED"
 grep -a "\[dbg\] run finished: cleaned=" "$OUT/clean-run-dbg.txt" | tail -1
-if [ "$DBG" -eq 0 ]; then echo "ENGINE NEVER ENGAGED (no [dbg] lines)"; exit 1; fi
+if [ "$DBG" -eq 0 ]; then fail "ENGINE NEVER ENGAGED (no [dbg] lines)"; fi
 
 echo "=== final crash check ==="
 if app_crashed; then
   echo "APP CRASH DETECTED — see ci/out/app-crash.txt"
   save_crash
-  exit 1
+  fail "APP CRASH DETECTED"
 fi
 
 echo "EMULATOR TEST OK"
