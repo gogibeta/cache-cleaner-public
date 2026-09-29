@@ -3,7 +3,7 @@
      flags, or notification timeout at runtime. Changing AccessibilityService
      info via setServiceInfo() at runtime causes the system to unbind (and
      later rebind) the service — on the user's vivo this killed automation
-     within 0.1–0.6 s of every toggle (see log analysis 2026-09-30).
+     within 0.1–0.6 s of every toggle (see log analysis 2026-09-29).
      The full event set (window-state-changed + view-scrolled +
      window-content-changed) is declared here once; the engine ignores events
      while no run is active, so there is no battery cost to the static mask.
