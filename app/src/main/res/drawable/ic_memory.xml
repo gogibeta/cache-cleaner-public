@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- RAM chip: body + pins on all four sides -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,5h2v3h-2zM14,5h2v3h-2zM10,16h2v3h-2zM14,16h2v3h-2zM5,10h3v2H5zM5,14h3v2H5zM16,10h3v2h-3zM16,14h3v2h-3zM8,8h8v8H8z" />
+</vector>
