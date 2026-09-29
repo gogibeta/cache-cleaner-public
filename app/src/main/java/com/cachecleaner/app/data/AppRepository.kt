@@ -6,11 +6,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Process
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One row in the app list.
@@ -18,17 +23,29 @@ import android.view.inputmethod.InputMethodManager
 data class AppEntry(
     val packageName: String,
     val label: String,
-    val icon: Drawable?,
     val isSystem: Boolean,
     val isRunning: Boolean,
     /** Cached data reported by StorageStatsManager, in bytes. Best-effort. */
     val cacheBytes: Long,
     val lastUsed: Long
+    // NOTE: no icon field on purpose. Icons are loaded lazily per visible
+    // row through IconCache (see HomeScreen's AppIcon): loading every
+    // installed app's icon eagerly at list time kept the home screen on its
+    // spinner for minutes and ANR'd the CI emulator (runs 94/95).
 )
 
 class AppRepository(private val context: Context) {
 
     private val pm: PackageManager = context.packageManager
+
+    /**
+     * Bounded dispatcher for the per-package fan-out in [loadApps]
+     * (launch-intent checks, storage-stats queries). Unbounded parallelism
+     * would fire hundreds of concurrent binder IPCs at system_server; 16
+     * keeps it fast without hammering the system.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val parallelIO = Dispatchers.IO.limitedParallelism(16)
     /** True if the user granted "Usage access" (PACKAGE_USAGE_STATS app-op). */
     fun hasUsageAccess(): Boolean {
         return try {
@@ -115,17 +132,6 @@ class AppRepository(private val context: Context) {
 
         val prefs = PrefsStore(context)
 
-        // ---- launch-intent cache (mirrors C2674f.f20780a) ----
-        val launchIntentCache = HashMap<String, Boolean>()
-        fun hasLaunchIntent(pkg: String): Boolean =
-            launchIntentCache.getOrPut(pkg) {
-                try {
-                    pm.getLaunchIntentForPackage(pkg) != null
-                } catch (_: Exception) {
-                    false
-                }
-            }
-
         // ---- installed apps (mirrors C2674f.d) ----
         val installed: List<ApplicationInfo> = try {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -137,6 +143,27 @@ class AppRepository(private val context: Context) {
         } catch (_: Exception) {
             emptyList()
         }
+        val allPkgs = installed.mapNotNull { it.packageName }.distinct()
+
+        // ---- launch-intent cache (mirrors C2674f.f20780a) ----
+        // Filled in parallel, bounded: the sequential version issued one
+        // PackageManager IPC per installed package (~hundreds, one at a
+        // time), which alone stalled list loading for minutes on the CI
+        // emulator (runs 94/95, 2026-09-29).
+        val launchIntentCache = ConcurrentHashMap<String, Boolean>()
+        coroutineScope {
+            allPkgs.map { pkg ->
+                async(parallelIO) {
+                    val has = try {
+                        pm.getLaunchIntentForPackage(pkg) != null
+                    } catch (_: Exception) {
+                        false
+                    }
+                    launchIntentCache[pkg] = has
+                }
+            }.awaitAll()
+        }
+        fun hasLaunchIntent(pkg: String): Boolean = launchIntentCache[pkg] == true
 
         // ---- running set (mirrors the reference's final loop) ----
         val runningPkgs = RunningClassifier.filterRunning(
@@ -160,18 +187,26 @@ class AppRepository(private val context: Context) {
         val useForegroundFilter = foregroundedPkgs.isNotEmpty()
 
         // ---- per-package cache bytes (mirrors XCleaner C2660f.a) ----
+        // Queried in parallel, bounded: the sequential version issued one
+        // StorageStatsManager binder call per package, and a single slow UID
+        // stalled the whole list behind it (runs 94/95, 2026-09-29).
         val cacheByPkg = mutableMapOf<String, Long>()
         if (hasUsageAccess()) {
             val stats = CacheStats(context)
-            val pkgs = installed.mapNotNull { it.packageName }
-            // Sequential binder calls; each queryStatsForUid is fast and the
-            // whole block runs on Dispatchers.IO from the caller.
-            for (pkg in pkgs) {
-                try {
-                    val bytes = stats.cacheBytes(pkg)
-                    if (bytes > 0) cacheByPkg[pkg] = bytes
-                } catch (_: Exception) {
-                }
+            val results = coroutineScope {
+                allPkgs.map { pkg ->
+                    async(parallelIO) {
+                        val bytes = try {
+                            stats.cacheBytes(pkg)
+                        } catch (_: Exception) {
+                            0L
+                        }
+                        pkg to bytes
+                    }
+                }.awaitAll()
+            }
+            for ((pkg, bytes) in results) {
+                if (bytes > 0) cacheByPkg[pkg] = bytes
             }
         }
 
@@ -214,11 +249,8 @@ class AppRepository(private val context: Context) {
                 } catch (_: Exception) {
                     pkg
                 }
-                val icon = try {
-                    pm.getApplicationIcon(ai)
-                } catch (_: Exception) {
-                    null
-                }
+                // No eager icon load here: icons arrive lazily per visible
+                // row via IconCache (see HomeScreen's AppIcon).
                 val isSystem = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0
                 // isRunning: FLAG_STOPPED-clear candidate AND (recent
                 // foreground event if usage access is available). FLAG_STOPPED
@@ -233,7 +265,6 @@ class AppRepository(private val context: Context) {
                 out += AppEntry(
                     packageName = pkg,
                     label = label,
-                    icon = icon,
                     isSystem = isSystem,
                     isRunning = isRunning,
                     cacheBytes = cacheByPkg[pkg] ?: 0L,
