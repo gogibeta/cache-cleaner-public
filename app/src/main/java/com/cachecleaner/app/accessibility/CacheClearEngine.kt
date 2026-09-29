@@ -35,7 +35,7 @@ import kotlinx.coroutines.withTimeout
  *   declared statically in accessibility_service_config.xml and NEVER
  *   changed at runtime: calling setServiceInfo() at runtime makes the
  *   system unbind/rebind the service, which killed automation within
- *   0.1-0.6 s on the user's vivo (log analysis 2026-09-30). Events are
+ *   0.1-0.6 s on the user's vivo (log analysis 2026-09-29). Events are
  *   ignored while no run is active.
  * - The App info screen is opened with
  *   `Settings.ACTION_APPLICATION_DETAILS_SETTINGS` ("package:<pkg>").
@@ -436,7 +436,7 @@ class CacheClearEngine(private val appContext: Context) {
                 listener?.onLog("  [dbg] Storage click dispatched, result=$clickResult")
                 // Fire-and-forget like the reference: the Storage screen's
                 // own window-state-changed event drives the next stage.
-                stage = Stage.WAIT_STORAGE
+                advanceStage(Stage.WAIT_STORAGE)
             }
         } catch (_: Exception) {
             try { storage.recycle() } catch (_: Exception) {}
@@ -483,7 +483,7 @@ class CacheClearEngine(private val appContext: Context) {
                 // the dialog stage handles it, and its watchdog completes
                 // the attempt either way.
                 clearCacheClicked = true
-                stage = Stage.WAIT_DIALOG
+                advanceStage(Stage.WAIT_DIALOG)
                 delay(DIALOG_WATCHDOG_MS)
                 if (stage == Stage.WAIT_DIALOG && clearCacheClicked) {
                     listener?.onLog("  [dbg] no confirmation dialog appeared, finishing package")
@@ -528,6 +528,19 @@ class CacheClearEngine(private val appContext: Context) {
             handledWindowIds.add(node.windowId)
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Move to the next stage. The handled-window set is cleared because the
+     * next screen may legitimately live in the SAME window (e.g. the Storage
+     * screen as a fragment inside the App info window on some OEM skins);
+     * keeping the old window id suppressed would make the engine ignore the
+     * new screen and time out. Within a stage, markHandled() still prevents
+     * double-clicking the same row.
+     */
+    private fun advanceStage(next: Stage) {
+        stage = next
+        handledWindowIds.clear()
     }
 
     private fun tryScrollForward(root: AccessibilityNodeInfo): Boolean {
