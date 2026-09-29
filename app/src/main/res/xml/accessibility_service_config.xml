@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static declaration; CacheAccessService NEVER changes the event types,
+     flags, or notification timeout at runtime. Changing AccessibilityService
+     info via setServiceInfo() at runtime causes the system to unbind (and
+     later rebind) the service — on the user's vivo this killed automation
+     within 0.1–0.6 s of every toggle (see log analysis 2026-09-30).
+     The full event set (window-state-changed + view-scrolled +
+     window-content-changed) is declared here once; the engine ignores events
+     while no run is active, so there is no battery cost to the static mask.
+     notificationTimeout=0: events are delivered immediately instead of being
+     throttled to one batch per 100 ms (turbo-mode speedup). -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeViewScrolled|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="0"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="false" />
