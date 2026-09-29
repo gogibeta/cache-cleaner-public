@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cache Cleaner</string>
+
+    <!-- Accessibility service -->
+    <string name="accessibility_service_label">Cache Cleaner automation</string>
+    <string name="accessibility_service_description">Lets Cache Cleaner tap “Storage” → “Clear cache” on App info screens for the apps you select. It is only active while a clean run is in progress.</string>
+
+    <!-- Home -->
+    <string name="refresh">Refresh</string>
+    <string name="search_hint">Search apps…</string>
+    <string name="filter_all">All</string>
+    <string name="filter_cached">With cache</string>
+    <string name="filter_running">Running</string>
+    <string name="select_all">Select all</string>
+    <string name="clear">Clear</string>
+    <string name="no_apps">No apps match.</string>
+    <string name="no_apps_no_usage">No apps detected. Grant usage access above to measure cache sizes.</string>
+    <string name="status_running">Running</string>
+    <string name="status_not_running">Not running</string>
+    <string name="whitelist_action">Add to whitelist</string>
+
+    <!-- Cache card -->
+    <string name="cache_title">Junk cache</string>
+    <string name="cache_stats">%1$s of cache across listed apps</string>
+    <string name="cache_needs_usage">Grant usage access to measure cache sizes.</string>
+    <string name="cache_none">no cache</string>
+
+    <!-- Setup -->
+    <string name="setup_title">Almost ready — two permissions needed</string>
+    <string name="setup_usage">Usage access — to measure each app’s cache size</string>
+    <string name="setup_a11y">Accessibility service — to tap “Clear cache” for you</string>
+    <string name="grant">Grant</string>
+    <string name="open_settings">Open settings</string>
+
+    <!-- Run controls -->
+    <string name="turbo_title">Turbo mode</string>
+    <string name="turbo_desc">No pause between apps and faster tapping. Slightly less gentle on slow phones.</string>
+    <string name="clean_apps">Clean cache</string>
+    <string name="clean_n_apps">Clean cache for %d apps</string>
+    <string name="select_hint">Select apps from the list below to enable this button.</string>
+    <string name="cancel_run">Cancel run</string>
+    <string name="run_log">Run log (%d)</string>
+
+    <!-- Result card -->
+    <string name="result_1_cleaned">1 app cleaned</string>
+    <string name="result_n_cleaned">%d apps cleaned</string>
+    <string name="result_subtitle">in %1$ds%2$s</string>
+    <string name="turbo_suffix"> • Turbo mode</string>
+    <string name="stat_cleaned">Cleaned</string>
+    <string name="stat_cache_freed">Cache freed</string>
+    <string name="stat_time">Time taken</string>
+
+    <!-- Whitelist -->
+    <string name="whitelist_title">Whitelist</string>
+    <string name="whitelist_empty">No whitelisted apps. Tap the shield icon on any app to always skip it.</string>
+    <string name="whitelist_desc">These apps will never appear in the list and will never be cleaned.</string>
+    <string name="back">Back</string>
+    <string name="remove">Remove</string>
+
+    <!-- Notifications -->
+    <string name="notif_channel_name">Clean runs</string>
+    <string name="notif_channel_desc">Progress and results of cache clean runs.</string>
+    <string name="notif_title">Cache Cleaner</string>
+    <string name="notif_starting">Preparing…</string>
+    <string name="notif_progress_text">%1$d of %2$d — %3$s</string>
+    <string name="notif_finishing">Finishing…</string>
+    <string name="notif_done_title">Clean run finished</string>
+    <string name="notif_done_text">%1$d cleaned • %2$d failed • %3$d skipped • ≈%4$s cache freed</string>
+    <string name="notif_accessibility_needed_title">Accessibility service is off</string>
+    <string name="notif_accessibility_needed_text">Enable the Cache Cleaner accessibility service, then start the run again.</string>
+    <string name="cancel">Cancel</string>
+</resources>
