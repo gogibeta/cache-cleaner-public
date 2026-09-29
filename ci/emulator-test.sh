@@ -5,7 +5,7 @@
 # launches the app, then:
 #   2a. taps "Select all" and verifies N apps get selected, then "Clear";
 #   2b. switches to the "With cache" filter, selects one app that has
-#       cache, taps "Clean 1 apps" and verifies the CacheClearEngine
+#       cache, taps "Clean cache for 1 apps" and verifies the CacheClearEngine
 #       automation trace ([dbg] lines) in logcat through to the
 #       run-finished marker ("[dbg] run finished: cleaned=N failed=M skipped=K freed=...").
 # The harness tolerates slow emulator boot (system ANR dialogs are
@@ -241,7 +241,7 @@ echo "app process is alive"
 
 echo "=== phase 2a: Select-all UI test ==="
 wait_and_tap "^Select all$" "Select all" 300 || fail "SELECT-ALL TAP FAILED"
-CLEANLABEL=$(wait_for_text "^Clean [0-9]+ apps$" 120) || fail "CLEAN-BUTTON NEVER APPEARED"
+CLEANLABEL=$(wait_for_text "^Clean cache for [0-9]+ apps$" 120) || fail "CLEAN-BUTTON NEVER APPEARED"
 N=$(echo "$CLEANLABEL" | grep -o "[0-9][0-9]*")
 echo "select-all -> '$CLEANLABEL' (N=$N)"
 if [ -z "$N" ] || [ "$N" -eq 0 ]; then
@@ -278,9 +278,9 @@ EOF
 echo "tapping first app row at $FIRST_ROW"
 # shellcheck disable=SC2086
 adb shell input tap $FIRST_ROW
-CLEANLABEL=$(wait_for_text "^Clean 1 apps$" 60) || fail "CLEAN-1 BUTTON NEVER APPEARED"
+CLEANLABEL=$(wait_for_text "^Clean cache for 1 apps$" 60) || fail "CLEAN-1 BUTTON NEVER APPEARED"
 echo "selected 1 app -> '$CLEANLABEL'"
-wait_and_tap "^Clean 1 apps$" "Clean 1 app" 60 || fail "CLEAN TAP FAILED"
+wait_and_tap "^Clean cache for 1 apps$" "Clean 1 app" 60 || fail "CLEAN TAP FAILED"
 
 echo "=== waiting for the run to finish (up to 8 min) ==="
 FOUND=""
