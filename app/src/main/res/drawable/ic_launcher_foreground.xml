@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- White octagon stop mark centered on the blue background -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66.9,32.7l12.4,12.4c1.2,1.2 1.9,2.9 1.9,4.6v16.6c0,1.7 -0.7,3.4 -1.9,4.6L66.9,83.3c-1.2,1.2 -2.9,1.9 -4.6,1.9H45.7c-1.7,0 -3.4,-0.7 -4.6,-1.9L28.7,70.9c-1.2,-1.2 -1.9,-2.9 -1.9,-4.6V49.7c0,-1.7 0.7,-3.4 1.9,-4.6l12.4,-12.4c1.2,-1.2 2.9,-1.9 4.6,-1.9h16.6c1.7,0 3.4,0.7 4.6,1.9zM47,47v14h14V47H47z" />
+</vector>
