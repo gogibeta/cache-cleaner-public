@@ -54,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +74,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cachecleaner.app.R
 import com.cachecleaner.app.data.AppEntry
+import com.cachecleaner.app.data.IconCache
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -640,7 +644,7 @@ private fun AppRow(
             modifier = Modifier.fillMaxWidth().padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AppIcon(drawable = entry.icon)
+            AppIcon(packageName = entry.packageName)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -684,7 +688,19 @@ private fun statusText(entry: AppEntry): String {
 }
 
 @Composable
-private fun AppIcon(drawable: Drawable?) {
+private fun AppIcon(packageName: String) {
+    val context = LocalContext.current
+    var drawable by remember(packageName) { mutableStateOf<Drawable?>(null) }
+    // Icons load lazily, off the UI thread, through the shared IconCache:
+    // loading every installed app's icon eagerly at list time kept the home
+    // screen on its spinner for minutes and ANR'd the CI emulator (runs
+    // 94/95). Visible rows fill in as their icons arrive; the placeholder
+    // shows until then.
+    LaunchedEffect(packageName) {
+        drawable = withContext(Dispatchers.IO) {
+            IconCache.get(context.packageManager, packageName)
+        }
+    }
     val bitmap = remember(drawable) { drawable?.toBitmap() }
     if (bitmap != null) {
         Image(
