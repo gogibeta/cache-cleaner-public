@@ -324,9 +324,28 @@ tap_until_text() {
 
 # ---------- test ----------
 
-echo "=== launching app ==="
-adbw shell am start -n "$MAIN" || fail "AM START FAILED"
-sleep 8
+echo "=== launching app (retries survive a wedged system_server) ==="
+# run 102: system_server was wedged (framework had just restarted, system
+# ANR dumps in logcat) and `adb shell am start` hung past ADB_TIMEOUT, so
+# the run died before any UI was exercised. Re-issuing am start on a wedged
+# system just re-sends the launch intent; bound the attempts and verify the
+# app process is alive before continuing.
+LAUNCH_OK=""
+for attempt in $(seq 1 6); do
+  log "launch attempt $attempt/6: am start"
+  if adbw shell am start -n "$MAIN" > /dev/null 2>&1; then
+    sleep 8
+    if [ -n "$(adbw shell pidof "$PKG" 2>/dev/null)" ]; then
+      LAUNCH_OK=1
+      break
+    fi
+    log "am start returned ok but no $PKG process yet; retrying"
+  else
+    log "am start failed/timed out; retrying"
+  fi
+  sleep 30
+done
+[ -n "$LAUNCH_OK" ] || fail "AM START FAILED (6 attempts)"
 screenshot "cachecleaner-home.png"
 
 echo "=== launch health check ==="
@@ -336,7 +355,7 @@ if app_crashed; then
   fail "APP CRASHED ON LAUNCH"
 fi
 if [ -z "$(adbw shell pidof "$PKG" 2>/dev/null)" ]; then
-fail "APP PROCESS NOT RUNNING after launch"
+  fail "APP PROCESS NOT RUNNING after launch"
 fi
 echo "app process is alive"
 
