@@ -45,7 +45,12 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun CacheCleanerTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    // Static palette by default: the dynamic scheme performs a synchronous
+    // WallpaperManager binder IPC on the main thread during first
+    // composition, which stalls startup on slow/wedged devices (the CI
+    // emulator ANR'd during launch, run 36647707296). The static schemes
+    // above are the app's full palette anyway.
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current

@@ -22,6 +22,7 @@ import java.util.LinkedHashMap
 object IconCache {
     private const val MAX_ENTRIES = 128
 
+    private val lock = Any()
     private val cache =
         object : LinkedHashMap<String, Drawable?>(MAX_ENTRIES, 0.75f, true) {
             override fun removeEldestEntry(
@@ -29,21 +30,34 @@ object IconCache {
             ): Boolean = size > MAX_ENTRIES
         }
 
-    /** Returns the cached icon, loading and caching it on a miss. */
-    @Synchronized
+    /**
+     * Returns the cached icon, loading and caching it on a miss.
+     *
+     * The slow [PackageManager.getApplicationIcon] call runs OUTSIDE the
+     * lock: the previous @Synchronized version serialized every row's icon
+     * load behind a single monitor (logcat showed 1.5s+ monitor contention
+     * per icon on the CI emulator, run 36647707296), clogging the IO
+     * dispatcher while icons trickled in one at a time. Callers must still
+     * invoke [get] off the main thread.
+     */
     fun get(pm: PackageManager, packageName: String): Drawable? {
-        if (cache.containsKey(packageName)) return cache[packageName]
+        synchronized(lock) {
+            if (cache.containsKey(packageName)) return cache[packageName]
+        }
         val d = try {
             pm.getApplicationIcon(packageName)
         } catch (_: Exception) {
             null
         }
-        cache[packageName] = d
-        return d
+        synchronized(lock) {
+            // Another thread may have loaded it while we were loading.
+            if (cache.containsKey(packageName)) return cache[packageName]
+            cache[packageName] = d
+            return d
+        }
     }
 
-    @Synchronized
     fun clear() {
-        cache.clear()
+        synchronized(lock) { cache.clear() }
     }
 }

@@ -63,6 +63,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -690,21 +691,27 @@ private fun statusText(entry: AppEntry): String {
 @Composable
 private fun AppIcon(packageName: String) {
     val context = LocalContext.current
-    var drawable by remember(packageName) { mutableStateOf<Drawable?>(null) }
+    var imageBitmap by remember(packageName) { mutableStateOf<ImageBitmap?>(null) }
     // Icons load lazily, off the UI thread, through the shared IconCache:
     // loading every installed app's icon eagerly at list time kept the home
     // screen on its spinner for minutes and ANR'd the CI emulator (runs
     // 94/95). Visible rows fill in as their icons arrive; the placeholder
     // shows until then.
+    //
+    // The Drawable -> Bitmap rasterization MUST also happen off the UI
+    // thread (inside this IO block, not in a remember during composition).
+    // Rasterizing an AdaptiveIcon in composition blocked the main thread
+    // for seconds per icon on the CI emulator; ~10 rows arriving together
+    // saturated it past the input-dispatch timeout and ANR'd the app on the
+    // FocusEvent right after the first frame (run 36647707296).
     LaunchedEffect(packageName) {
-        drawable = withContext(Dispatchers.IO) {
-            IconCache.get(context.packageManager, packageName)
+        imageBitmap = withContext(Dispatchers.IO) {
+            IconCache.get(context.packageManager, packageName)?.toBitmap()?.asImageBitmap()
         }
     }
-    val bitmap = remember(drawable) { drawable?.toBitmap() }
-    if (bitmap != null) {
+    if (imageBitmap != null) {
         Image(
-            bitmap = bitmap.asImageBitmap(),
+            bitmap = imageBitmap!!,
             contentDescription = null,
             modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
         )

@@ -23,8 +23,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -34,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cachecleaner.app.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,6 +50,23 @@ fun WhitelistScreen(
     val whitelist by vm.whitelist.collectAsState()
     val context = LocalContext.current
     val pm = context.packageManager
+
+    // App labels resolve off the UI thread: PackageManager IPCs during
+    // composition stall scrolling and can ANR on slow devices (same bug
+    // class as the home-screen icon rasterization ANR, run 36647707296).
+    var labels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(whitelist) {
+        labels = withContext(Dispatchers.IO) {
+            whitelist.associateWith { pkg ->
+                try {
+                    val ai = pm.getApplicationInfo(pkg, 0)
+                    pm.getApplicationLabel(ai).toString()
+                } catch (_: Exception) {
+                    pkg
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -80,12 +103,7 @@ fun WhitelistScreen(
                     )
                 }
                 items(whitelist.sorted(), key = { it }) { pkg ->
-                    val label = try {
-                        val ai = pm.getApplicationInfo(pkg, 0)
-                        pm.getApplicationLabel(ai).toString()
-                    } catch (_: Exception) {
-                        pkg
-                    }
+                    val label = labels[pkg] ?: pkg
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             Modifier.fillMaxWidth().padding(12.dp),
