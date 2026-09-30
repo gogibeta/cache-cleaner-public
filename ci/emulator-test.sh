@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Emulator test for Cache Cleaner.
 # Runs on a GitHub Actions emulator (AOSP / Google APIs image, NOT MIUI):
-# installs the APK, grants usage-stats, enables the accessibility service,
-# launches the app, then:
+# installs the APK (the R8 release build, see the workflow), grants
+# usage-stats, enables the accessibility service, launches the app, then:
 #   2a. waits for the app list to load, taps "Select all" (re-tapping until
 #       the effect is verified — a tap can be swallowed by a loaded system)
 #       and verifies N apps get selected, then "Clear";
@@ -26,30 +26,51 @@ PKG="com.cachecleaner.app"
 SVC="com.cachecleaner.app/com.cachecleaner.app.accessibility.CacheAccessService"
 MAIN="$PKG/com.cachecleaner.app.MainActivity"
 
+# ---------- adb reliability ----------
+
+# Every adb call goes through adbw(). On a wedged system (no KVM on hosted
+# runners) a plain `adb shell uiautomator dump` can hang for many minutes;
+# run 36705397771 lost ~17 min inside hung adb calls with zero output, which
+# turned a slow emulator into a doomed run. Capping each call keeps every
+# poll loop on its intended pacing; a timeout is treated like a miss, not a
+# hang.
+ADB_TIMEOUT=60
+adbw() {
+  timeout "$ADB_TIMEOUT" adb "$@"
+}
+
+# Progress messages that must reach the step log even when the caller's
+# stdout is captured by command substitution: in run 36705397771
+# tap_until_text's diagnostics were swallowed by $(...) and the 17-minute
+# tap loop was completely invisible. log() writes to stderr instead.
+log() { echo "$@" >&2; }
+
 echo "=== installing $APK ==="
-adb install -r "$APK"
+adbw install -r "$APK" || fail "APK INSTALL FAILED"
 
 echo "=== granting usage-stats access ==="
-adb shell appops set "$PKG" GET_USAGE_STATS allow
+adbw shell appops set "$PKG" GET_USAGE_STATS allow || fail "APPOPS SET FAILED"
 
 echo "=== enabling accessibility service ==="
-adb shell settings put secure enabled_accessibility_services "$SVC"
-adb shell settings put secure accessibility_enabled 1
+adbw shell settings put secure enabled_accessibility_services "$SVC" || fail "A11Y ENABLE FAILED"
+adbw shell settings put secure accessibility_enabled 1 || fail "A11Y ENABLE FAILED"
 sleep 3
-adb shell settings get secure enabled_accessibility_services | tee "$OUT/accessibility.txt"
+adbw shell settings get secure enabled_accessibility_services | tee "$OUT/accessibility.txt"
 if ! grep -q "CacheAccessService" "$OUT/accessibility.txt"; then
   echo "ACCESSIBILITY SERVICE NOT ENABLED"; exit 1
 fi
 
 echo "=== granting notification permission (avoid runtime dialog) ==="
-adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
+adbw shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
 
 # ---------- UI automation helpers ----------
 
-# Dump the current UI hierarchy into $OUT/ui-dump.xml.
+# Dump the current UI hierarchy into $OUT/ui-dump.xml. Returns 1 when the
+# device is wedged and no dump could be produced (adbw timeout).
 ui_dump() {
-  adb shell uiautomator dump /data/local/tmp/ui.xml > /dev/null 2>&1
-  adb pull /data/local/tmp/ui.xml "$OUT/ui-dump.xml" > /dev/null 2>&1
+  adbw shell uiautomator dump /data/local/tmp/ui.xml > /dev/null 2>&1
+  adbw pull /data/local/tmp/ui.xml "$OUT/ui-dump.xml" > /dev/null 2>&1
+  [ -s "$OUT/ui-dump.xml" ]
 }
 
 # Print "x y" (center) of the first node whose text matches the regex.
@@ -92,26 +113,29 @@ EOF
 }
 
 # Single tap attempt on a node matching the regex. Returns 1 if absent.
+# Assumes a FRESH ui-dump.xml was just produced by the caller (avoids a
+# second dump per iteration — on a wedged system each dump can cost the
+# full ADB_TIMEOUT).
 tap_node() {
   local pattern="$1" desc="$2"
-  ui_dump
   local bounds
   if ! bounds=$(find_node "$pattern"); then
     return 1
   fi
-  echo "tapping '$desc' at $bounds"
+  log "tapping '$desc' at $bounds"
+  echo "tap $desc $bounds" >> "$OUT/tap-journal.log"
   # shellcheck disable=SC2086
-  adb shell input tap $bounds
+  adbw shell input tap $bounds
 }
 
 # True when logcat holds a FATAL EXCEPTION for our package.
 app_crashed() {
-  adb logcat -d -t 4000 2>/dev/null | grep -A3 "FATAL EXCEPTION" | grep -q "Process: $PKG"
+  adbw logcat -d -t 4000 2>/dev/null | grep -A3 "FATAL EXCEPTION" | grep -q "Process: $PKG"
 }
 
 # Save our app's crash stack trace for the artifacts.
 save_crash() {
-  adb logcat -d 2>/dev/null | grep -B2 -A30 "FATAL EXCEPTION" > "$OUT/app-crash.txt" || true
+  adbw logcat -d 2>/dev/null | grep -B2 -A30 "FATAL EXCEPTION" > "$OUT/app-crash.txt" || true
 }
 
 ANR_COUNT=0
@@ -127,14 +151,14 @@ APP_ANR_MAX=15
 # Snapshot logcat + the ANR traces file into the artifacts so a failure can
 # be diagnosed from the main-thread stack, not just a screenshot.
 capture_anr_trace() {
-  adb logcat -d > "$OUT/logcat-full.txt" 2>/dev/null || true
-  adb shell cat /data/anr/traces.txt > "$OUT/anr-traces.txt" 2>/dev/null || true
-  echo "captured logcat + anr traces into $OUT"
+  adbw logcat -d > "$OUT/logcat-full.txt" 2>/dev/null || true
+  adbw shell cat /data/anr/traces.txt > "$OUT/anr-traces.txt" 2>/dev/null || true
+  log "captured logcat + anr traces into $OUT"
 }
 
 # Fail helper: always capture diagnostics before exiting.
 fail() {
-  echo "FAIL: $1"
+  log "FAIL: $1"
   capture_anr_trace
   exit 1
 }
@@ -144,49 +168,52 @@ fail() {
 # OUR app's ANR: tap "Wait" and keep polling (bounded); return 1 only when it
 # persists past APP_ANR_MAX dismiss cycles.
 dismiss_system_dialogs() {
-  ui_dump
+  ui_dump || { log "ui_dump failed (wedged system), retrying"; return 0; }
   grep -q "isn't responding" "$OUT/ui-dump.xml" || { ANR_COUNT=0; APP_ANR_COUNT=0; return 0; }
   local title
   title=$(grep -o 'text="[^"]*isn'"'"'t responding"' "$OUT/ui-dump.xml" | head -1)
   if [[ "$title" == *"Cache Cleaner"* ]]; then
     APP_ANR_COUNT=$((APP_ANR_COUNT + 1))
-    echo "APP ANR (ours) — likely slow cold start under software emulation; tapping Wait ($APP_ANR_COUNT/$APP_ANR_MAX)"
+    log "APP ANR (ours) — likely slow cold start under software emulation; tapping Wait ($APP_ANR_COUNT/$APP_ANR_MAX)"
     capture_anr_trace
     if [ "$APP_ANR_COUNT" -ge "$APP_ANR_MAX" ]; then
-      echo "APP ANR PERSISTED — failing"
+      log "APP ANR PERSISTED — failing"
       return 1
     fi
     local bounds
     if bounds=$(find_node "^Wait$"); then
-      echo "tapping 'Wait' at $bounds"
+      log "tapping 'Wait' at $bounds"
       # shellcheck disable=SC2086
-      adb shell input tap $bounds
+      adbw shell input tap $bounds
       sleep 3
     fi
     return 0
   fi
-  echo "system ANR dialog: $title"
+  log "system ANR dialog: $title"
   ANR_COUNT=$((ANR_COUNT + 1))
   local bounds btn="Wait" bpat="^Wait$"
   if [ "$ANR_COUNT" -ge 8 ]; then
     btn="Close app"; bpat="^Close app$"; ANR_COUNT=0
   fi
   if bounds=$(find_node "$bpat"); then
-    echo "tapping '$btn' at $bounds"
+    log "tapping '$btn' at $bounds"
     # shellcheck disable=SC2086
-    adb shell input tap $bounds
+    adbw shell input tap $bounds
     sleep 3
   fi
   return 0
 }
 
 # Poll for a tap target up to timeout_s, dismissing system dialogs.
+# Single UI dump per iteration (dismiss_system_dialogs leaves a fresh dump
+# behind); tap_node reads that same dump so a dialog that pops up between
+# two dumps can't desync the tap coordinates.
 wait_and_tap() {
   local pattern="$1" desc="$2" timeout_s="$3"
   local tries=$((timeout_s / 5))
   for _ in $(seq 1 "$tries"); do
     if app_crashed; then
-      echo "APP CRASHED (logcat)"
+      log "APP CRASHED (logcat)"
       save_crash
       capture_anr_trace
       return 1
@@ -197,7 +224,7 @@ wait_and_tap() {
     fi
     sleep 5
   done
-  echo "TAP TARGET NOT FOUND after ${timeout_s}s: $desc (see ui-dump.xml)"
+  log "TAP TARGET NOT FOUND after ${timeout_s}s: $desc (see ui-dump.xml)"
   return 1
 }
 
@@ -207,7 +234,7 @@ wait_for_text() {
   local tries=$((timeout_s / 5))
   for _ in $(seq 1 "$tries"); do
     dismiss_system_dialogs || return 1
-    ui_dump
+    ui_dump || { sleep 5; continue; }
     local t
     if t=$(node_text "$pattern"); then
       echo "$t"
@@ -219,8 +246,8 @@ wait_for_text() {
 }
 
 screenshot() {
-  adb shell screencap -p "/data/local/tmp/$1"
-  adb pull "/data/local/tmp/$1" "$OUT/" > /dev/null 2>&1 || true
+  adbw shell screencap -p "/data/local/tmp/$1"
+  adbw pull "/data/local/tmp/$1" "$OUT/" > /dev/null 2>&1 || true
 }
 
 # Poll until the app list has finished loading: the filter row ("Select all")
@@ -232,8 +259,8 @@ wait_for_list_loaded() {
   local tries=$((timeout_s / 5))
   for _ in $(seq 1 "$tries"); do
     dismiss_system_dialogs || return 1
-    ui_dump
-    if grep -q 'text="Select all"' "$OUT/ui-dump.xml" \
+    if ui_dump \
+       && grep -q 'text="Select all"' "$OUT/ui-dump.xml" \
        && ! grep -q 'class="[^"]*ProgressBar"' "$OUT/ui-dump.xml"; then
       echo "app list loaded"
       return 0
@@ -248,18 +275,49 @@ wait_for_list_loaded() {
 # Needed because on a heavily loaded emulator a tap can be swallowed by the
 # system itself (run 36698575930: the Gesture Monitor ANR'd on our "Select
 # all" tap, which never reached the app) — assuming the tap landed turns a
-# lost tap into a ~26-minute doomed poll. Only use for idempotent taps.
+# lost tap into a long doomed poll. Only use for idempotent taps.
+#
+# Dialog-aware: each attempt first settles the screen (dismisses any
+# "isn't responding" dialog) and only taps when the target is present on a
+# dialog-free dump. A tap issued while an ANR dialog is up lands on the
+# dialog, not the app — the silent failure mode in runs 99 and 101.
+# All progress goes through log() (stderr) so it survives the $(...)
+# capture at the call site; run 101's 17-minute loop was invisible because
+# its diagnostics went to stdout.
 tap_until_text() {
   local tap_pattern="$1" tap_desc="$2" text_pattern="$3" attempts="$4" wait_s="$5"
   local attempt label
   for attempt in $(seq 1 "$attempts"); do
-    wait_and_tap "$tap_pattern" "$tap_desc" 60 || return 1
-    echo "tap '$tap_desc' #$attempt sent; waiting for '$text_pattern'..."
+    log "tap_until_text: attempt $attempt/$attempts — settling screen for '$tap_desc'"
+    local settled=""
+    for _ in $(seq 1 24); do
+      if app_crashed; then
+        log "APP CRASHED (logcat)"
+        save_crash
+        capture_anr_trace
+        return 1
+      fi
+      dismiss_system_dialogs || return 1
+      if ! grep -q "isn't responding" "$OUT/ui-dump.xml" \
+         && find_node "$tap_pattern" > /dev/null; then
+        settled=1
+        break
+      fi
+      sleep 5
+    done
+    if [ -z "$settled" ]; then
+      log "tap_until_text: '$tap_desc' never appeared on a dialog-free screen"
+      return 1
+    fi
+    tap_node "$tap_pattern" "$tap_desc" || return 1
+    sleep 2
+    log "tap '$tap_desc' #$attempt sent; waiting for '$text_pattern'..."
     if label=$(wait_for_text "$text_pattern" "$wait_s"); then
+      log "tap effect verified: $label"
       echo "$label"
       return 0
     fi
-    echo "expected text not visible after tap #$attempt"
+    log "expected text not visible after tap #$attempt"
   done
   return 1
 }
@@ -267,7 +325,7 @@ tap_until_text() {
 # ---------- test ----------
 
 echo "=== launching app ==="
-adb shell am start -n "$MAIN"
+adbw shell am start -n "$MAIN" || fail "AM START FAILED"
 sleep 8
 screenshot "cachecleaner-home.png"
 
@@ -277,7 +335,7 @@ if app_crashed; then
   save_crash
   fail "APP CRASHED ON LAUNCH"
 fi
-if [ -z "$(adb shell pidof "$PKG" 2>/dev/null)" ]; then
+if [ -z "$(adbw shell pidof "$PKG" 2>/dev/null)" ]; then
 fail "APP PROCESS NOT RUNNING after launch"
 fi
 echo "app process is alive"
@@ -287,7 +345,7 @@ echo "=== phase 2a: Select-all UI test ==="
 # "Select all" is idempotent (selection is a set union), so a swallowed tap
 # just costs one more attempt instead of failing the run.
 wait_for_list_loaded 600 || fail "APP LIST NEVER LOADED"
-CLEANLABEL=$(tap_until_text "^Select all$" "Select all" "^Clean cache for [0-9]+ apps$" 4 30) \
+CLEANLABEL=$(tap_until_text "^Select all$" "Select all" "^Clean cache for [0-9]+ apps$" 5 45) \
   || fail "CLEAN-BUTTON NEVER APPEARED"
 N=$(echo "$CLEANLABEL" | grep -o "[0-9][0-9]*")
 echo "select-all -> '$CLEANLABEL' (N=$N)"
@@ -324,7 +382,7 @@ EOF
 ) || fail "NO CHECKABLE APP ROW FOUND"
 echo "tapping first app row at $FIRST_ROW"
 # shellcheck disable=SC2086
-adb shell input tap $FIRST_ROW
+adbw shell input tap $FIRST_ROW
 CLEANLABEL=$(wait_for_text "^Clean cache for 1 apps$" 60) || fail "CLEAN-1 BUTTON NEVER APPEARED"
 echo "selected 1 app -> '$CLEANLABEL'"
 wait_and_tap "^Clean cache for 1 apps$" "Clean 1 app" 60 || fail "CLEAN TAP FAILED"
@@ -338,14 +396,14 @@ for _ in $(seq 1 48); do
     save_crash
     fail "APP CRASHED DURING RUN"
   fi
-  if adb logcat -d -t 4000 2>/dev/null | grep -q "\[dbg\] run finished: cleaned="; then FOUND=1; break; fi
+  if adbw logcat -d -t 4000 2>/dev/null | grep -q "\[dbg\] run finished: cleaned="; then FOUND=1; break; fi
 done
 if [ -z "$FOUND" ]; then
   fail "RUN DID NOT FINISH IN TIME"
 fi
 
 echo "=== collecting clean-run diagnostics ==="
-adb logcat -d > "$OUT/logcat-full.txt" || true
+adbw logcat -d > "$OUT/logcat-full.txt" || true
 grep -iE "cachecleaner|CacheAccess|CacheClear" "$OUT/logcat-full.txt" | tail -120 > "$OUT/logcat-cachecleaner.txt" || true
 grep -a "CacheCleaner" "$OUT/logcat-full.txt" > "$OUT/clean-run-dbg.txt" || true
 screenshot "cachecleaner-after.png"
