@@ -3,7 +3,9 @@
 # Runs on a GitHub Actions emulator (AOSP / Google APIs image, NOT MIUI):
 # installs the APK, grants usage-stats, enables the accessibility service,
 # launches the app, then:
-#   2a. taps "Select all" and verifies N apps get selected, then "Clear";
+#   2a. waits for the app list to load, taps "Select all" (re-tapping until
+#       the effect is verified — a tap can be swallowed by a loaded system)
+#       and verifies N apps get selected, then "Clear";
 #   2b. switches to the "With cache" filter, selects one app that has
 #       cache, taps "Clean cache for 1 apps" and verifies the CacheClearEngine
 #       automation trace ([dbg] lines) in logcat through to the
@@ -221,6 +223,47 @@ screenshot() {
   adb pull "/data/local/tmp/$1" "$OUT/" > /dev/null 2>&1 || true
 }
 
+# Poll until the app list has finished loading: the filter row ("Select all")
+# is visible AND no progress indicator remains. Tapping "Select all" while the
+# list is still loading is a silent no-op (selectAllVisible over an empty
+# list), which used to send phase 2a into a 26-minute doomed poll.
+wait_for_list_loaded() {
+  local timeout_s="$1"
+  local tries=$((timeout_s / 5))
+  for _ in $(seq 1 "$tries"); do
+    dismiss_system_dialogs || return 1
+    ui_dump
+    if grep -q 'text="Select all"' "$OUT/ui-dump.xml" \
+       && ! grep -q 'class="[^"]*ProgressBar"' "$OUT/ui-dump.xml"; then
+      echo "app list loaded"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+# Tap a target, then wait for an expected text to appear; re-tap until the
+# text shows up or attempts run out. Prints the matched text on success.
+# Needed because on a heavily loaded emulator a tap can be swallowed by the
+# system itself (run 36698575930: the Gesture Monitor ANR'd on our "Select
+# all" tap, which never reached the app) — assuming the tap landed turns a
+# lost tap into a ~26-minute doomed poll. Only use for idempotent taps.
+tap_until_text() {
+  local tap_pattern="$1" tap_desc="$2" text_pattern="$3" attempts="$4" wait_s="$5"
+  local attempt label
+  for attempt in $(seq 1 "$attempts"); do
+    wait_and_tap "$tap_pattern" "$tap_desc" 60 || return 1
+    echo "tap '$tap_desc' #$attempt sent; waiting for '$text_pattern'..."
+    if label=$(wait_for_text "$text_pattern" "$wait_s"); then
+      echo "$label"
+      return 0
+    fi
+    echo "expected text not visible after tap #$attempt"
+  done
+  return 1
+}
+
 # ---------- test ----------
 
 echo "=== launching app ==="
@@ -240,8 +283,12 @@ fi
 echo "app process is alive"
 
 echo "=== phase 2a: Select-all UI test ==="
-wait_and_tap "^Select all$" "Select all" 300 || fail "SELECT-ALL TAP FAILED"
-CLEANLABEL=$(wait_for_text "^Clean cache for [0-9]+ apps$" 120) || fail "CLEAN-BUTTON NEVER APPEARED"
+# Wait for the list to load first, then tap-until-verified: re-tapping
+# "Select all" is idempotent (selection is a set union), so a swallowed tap
+# just costs one more attempt instead of failing the run.
+wait_for_list_loaded 600 || fail "APP LIST NEVER LOADED"
+CLEANLABEL=$(tap_until_text "^Select all$" "Select all" "^Clean cache for [0-9]+ apps$" 4 30) \
+  || fail "CLEAN-BUTTON NEVER APPEARED"
 N=$(echo "$CLEANLABEL" | grep -o "[0-9][0-9]*")
 echo "select-all -> '$CLEANLABEL' (N=$N)"
 if [ -z "$N" ] || [ "$N" -eq 0 ]; then
