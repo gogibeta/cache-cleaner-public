@@ -14,7 +14,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0-diag"
 
         // Keep only English strings: drops all other locales' resources.
         resourceConfigurations += "en"
@@ -22,6 +22,12 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+    }
+
+    lint {
+        // Offline builds can't fetch lint-gradle; skip the vital check for
+        // the diag build type (debug doesn't run it either).
+        checkReleaseBuilds = false
     }
 
     buildTypes {
@@ -32,6 +38,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("diag") {
+            // Diagnostic build: not debuggable (so it can be signed with the
+            // release key), but not minified/obfuscated for troubleshooting.
+            isDebuggable = false
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
         debug {
             // Keep debuggable builds unobfuscated for easier troubleshooting.

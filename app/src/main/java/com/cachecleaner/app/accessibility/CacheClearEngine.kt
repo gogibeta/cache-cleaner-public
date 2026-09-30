@@ -3,6 +3,7 @@ package com.cachecleaner.app.accessibility
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -132,6 +133,13 @@ class CacheClearEngine(private val appContext: Context) {
     private val handledWindowIds = mutableSetOf<Int>()
     private val settingsTextCache = mutableMapOf<String, Set<String>>()
     private val cacheStats = CacheStats(appContext)
+    /**
+     * Watchdog that bounds how long we wait for the Clear-cache button to
+     * appear on the Storage screen. The screen populates asynchronously,
+     * so the button is often absent from the first window event.
+     */
+    private var storageWatchdog: kotlinx.coroutines.Job? = null
+    private var storageWaitLogged = false
     // MIUI detection mirrors the reference: the
     // `ro.miui.ui.version.name` system property, not the manufacturer.
     private val miui: Boolean = detectMiui()
@@ -260,6 +268,8 @@ class CacheClearEngine(private val appContext: Context) {
         stage = Stage.IDLE
         attemptSignal = null
         rebindSignal = null
+        storageWatchdog?.cancel()
+        storageWatchdog = null
     }
 
     /**
@@ -318,26 +328,42 @@ class CacheClearEngine(private val appContext: Context) {
                 )
             )
             if (signal == AttemptSignal.SERVICE_LOST) {
-                // The accessibility service was torn down mid-attempt (vivo
-                // battery management). Wait for the rebind, then retry this
-                // package from a clean App info open.
+                // The accessibility service was torn down mid-attempt.
+                // Wait for the rebind (vivo can take up to ~60 s), then
+                // retry this package from a clean App info open.
                 val rs = rebindSignal
-                val rebound = if (rs == null) false else try {
-                    withTimeout(15000) { rs.await() }
+                val waitStart = SystemClock.uptimeMillis()
+                val rebound = if (rs == null) {
+                    false
+                } else try {
+                    withTimeout(REBIND_WAIT_MS) { rs.await() }
                     true
+                } catch (_: TimeoutCancellationException) {
+                    false
+                } catch (e: CancellationException) {
+                    // Run was cancelled while waiting — propagate, don't
+                    // silently fail the package.
+                    throw e
                 } catch (_: Exception) {
                     false
                 }
+                val waitedMs = SystemClock.uptimeMillis() - waitStart
                 rebindSignal = null
                 if (rebound) {
-                    listener?.onLog("  [dbg] service rebound, retrying ${appLabel(pkg)}")
-                    FileLogger.log("engine", "service rebound, retrying package", data = mapOf("pkg" to pkg))
+                    listener?.onLog("  [dbg] service rebound after ${waitedMs}ms, retrying ${appLabel(pkg)}")
+                    FileLogger.log(
+                        "engine", "service rebound, retrying package",
+                        data = mapOf("pkg" to pkg, "waited_ms" to waitedMs.toString())
+                    )
                     retried = true
                     handledWindowIds.clear()
                     continue
                 }
-                listener?.onLog("  [dbg] service did not rebound, failing ${appLabel(pkg)}")
-                FileLogger.log("engine", "service did not rebound, failing package", data = mapOf("pkg" to pkg))
+                listener?.onLog("  [dbg] service did not rebound in ${waitedMs}ms, failing ${appLabel(pkg)}")
+                FileLogger.log(
+                    "engine", "service did not rebound, failing package",
+                    data = mapOf("pkg" to pkg, "waited_ms" to waitedMs.toString())
+                )
                 return PackageOutcome.FAILED
             }
             when (val step = nextStep(signal, retried, miui)) {
@@ -511,13 +537,42 @@ class CacheClearEngine(private val appContext: Context) {
         if (stage != Stage.WAIT_STORAGE) return
         val button = findClearCacheButton(root, eventPkg)
         if (button == null) {
-            listener?.onLog("  [dbg] Storage screen shown but Clear-cache button not found")
-            completeAttempt(AttemptSignal.CLEAR_CACHE_MISSING)
+            // The Storage screen populates asynchronously: the Clear-cache
+            // button is often missing from the first window event but
+            // appears once storage stats finish computing (1-3 s on cold
+            // load). Wait for it (bounded) instead of failing immediately —
+            // the instant CLEAR_CACHE_MISSING was the top failure mode in
+            // phone logs. Subsequent window-content-changed events re-enter
+            // here; the watchdog below bounds the wait if the screen goes
+            // quiet.
+            if (!storageWaitLogged) {
+                storageWaitLogged = true
+                listener?.onLog("  [dbg] Storage screen shown, waiting for Clear-cache button")
+            }
+            startStorageWatchdog()
             return
         }
+        storageWatchdog?.cancel()
+        storageWatchdog = null
         markHandled(button)
         listener?.onLog("  [dbg] Clear-cache button found, clicking")
         clickClearCache(button)
+    }
+
+    /**
+     * Bounds the wait for the Clear-cache button. Fires only if the Storage
+     * screen stops sending events without the button ever appearing.
+     */
+    private fun startStorageWatchdog() {
+        if (storageWatchdog?.isActive == true) return
+        storageWatchdog = scope.launch {
+            delay(AutomationPolicy.STORAGE_SETTLE_TIMEOUT_MS)
+            if (stage == Stage.WAIT_STORAGE && running) {
+                listener?.onLog("  [dbg] Clear-cache button never appeared, giving up")
+                FileLogger.log("engine", "storage settle timeout, Clear-cache button not found")
+                completeAttempt(AttemptSignal.CLEAR_CACHE_MISSING)
+            }
+        }
     }
 
     private fun clickClearCache(button: AccessibilityNodeInfo) {
@@ -605,11 +660,19 @@ class CacheClearEngine(private val appContext: Context) {
      * screen as a fragment inside the App info window on some OEM skins);
      * keeping the old window id suppressed would make the engine ignore the
      * new screen and time out. Within a stage, markHandled() still prevents
-     * double-clicking the same row.
+     * double-clicking the same row. The Storage settle watchdog is
+     * (re)started when entering WAIT_STORAGE and cancelled on exit.
      */
     private fun advanceStage(next: Stage) {
+        if (stage == Stage.WAIT_STORAGE && next != Stage.WAIT_STORAGE) {
+            storageWatchdog?.cancel()
+            storageWatchdog = null
+        }
         stage = next
         handledWindowIds.clear()
+        if (next == Stage.WAIT_STORAGE) {
+            storageWaitLogged = false
+        }
     }
 
     private fun tryScrollForward(root: AccessibilityNodeInfo): Boolean {
@@ -799,6 +862,13 @@ class CacheClearEngine(private val appContext: Context) {
     }
 
     companion object {
+        /**
+         * How long to wait for the accessibility service to rebind after a
+         * mid-run unbind. Phone logs show vivo rebinds in 6-56 s; 60 s
+         * covers the observed range without hanging forever.
+         */
+        private const val REBIND_WAIT_MS = 60000L
+
         /** Settings string resource names for the "Storage" row. */
         private val STORAGE_RES_NAMES = arrayOf(
             "app_manager_menu_clear_data", // MIUI App info row

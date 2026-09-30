@@ -11,10 +11,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Ask to be exempt from battery optimizations: vivo/Funtouch kills
-         background apps aggressively, which tears down the accessibility
-         service mid-run -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Launcher-intent query: lets us enumerate every launchable app on
          Android 11+ without the QUERY_ALL_PACKAGES permission -->

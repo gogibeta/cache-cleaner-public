@@ -30,9 +30,6 @@
     <string name="setup_title">Almost ready — a few things needed</string>
     <string name="setup_usage">Usage access — to measure each app’s cache size</string>
     <string name="setup_a11y">Accessibility service — to tap “Clear cache” for you</string>
-    <string name="setup_battery_title">Battery unrestricted</string>
-    <string name="setup_battery_body">Vivo phones turn off accessibility for battery-optimized apps. Tap “Allow unrestricted” below, then also set: Settings &gt; Battery &gt; Background power consumption &gt; Cache Cleaner &gt; Don’t restrict.</string>
-    <string name="allow_unrestricted">Allow unrestricted</string>
     <string name="grant">Grant</string>
     <string name="open_settings">Open settings</string>
 

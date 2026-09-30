@@ -46,6 +46,17 @@ object AutomationPolicy {
     /** Confirmation-dialog watchdog after the clear click, turbo mode. */
     const val TURBO_DIALOG_WATCHDOG_MS = 600L
 
+    /**
+     * How long to wait for the Clear-cache button to appear on the Storage
+     * screen before giving up with CLEAR_CACHE_MISSING. The Storage screen
+     * populates asynchronously (storage stats compute in the background),
+     * so the button is often missing from the first window event but
+     * appears a second or two later. Phone logs showed the instant
+     * give-up was the top failure mode (34 failed packages in one run).
+     * Must be shorter than the per-package watchdog (6 s turbo).
+     */
+    const val STORAGE_SETTLE_TIMEOUT_MS = 4000L
+
     const val EVENT_WINDOW_STATE_CHANGED = 32
     const val EVENT_WINDOW_CONTENT_CHANGED = 2048
     const val EVENT_VIEW_SCROLLED = 4096

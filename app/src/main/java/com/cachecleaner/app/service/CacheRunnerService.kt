@@ -18,6 +18,7 @@ import com.cachecleaner.app.accessibility.CacheClearEngine
 import com.cachecleaner.app.accessibility.CacheClearEngineHolder
 import com.cachecleaner.app.accessibility.CacheAccessService
 import com.cachecleaner.app.data.FileLogger
+import com.cachecleaner.app.data.FileLog
 import com.cachecleaner.app.ui.formatBytes
 import com.cachecleaner.app.ui.formatRunMarker
 import kotlinx.coroutines.CoroutineScope
@@ -352,6 +353,12 @@ object RunLog {
         // app restarts and can be downloaded from the app.
         try {
             FileLogger.log("run", line)
+        } catch (_: Exception) {
+        }
+        // …and to the diag runlog-*.txt file on external files dir
+        // (DIAG builds: the file the tester sends back).
+        try {
+            FileLog.append(line)
         } catch (_: Exception) {
         }
         synchronized(lock) {

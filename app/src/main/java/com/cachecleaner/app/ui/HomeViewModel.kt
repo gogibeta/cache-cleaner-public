@@ -58,10 +58,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val _a11yEnabled = MutableStateFlow(false)
     val a11yEnabled: StateFlow<Boolean> = _a11yEnabled.asStateFlow()
 
-    /** True when the app is exempt from battery optimizations ("Unrestricted"). */
-    private val _batteryUnrestricted = MutableStateFlow(true)
-    val batteryUnrestricted: StateFlow<Boolean> = _batteryUnrestricted.asStateFlow()
-
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
 
@@ -103,7 +99,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _a11yEnabled.value = withContext(Dispatchers.IO) {
             CacheAccessService.isEnabled(getApplication())
         }
-        _batteryUnrestricted.value = withContext(Dispatchers.IO) { repo.isBatteryUnrestricted() }
     }
 
     private suspend fun loadApps() {
@@ -148,7 +143,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 _logLines.value = withContext(Dispatchers.IO) { FileLogger.lineCount() }
                 // Refresh access states cheaply while visible.
                 _a11yEnabled.value = CacheAccessService.isEnabled(getApplication())
-                _batteryUnrestricted.value = withContext(Dispatchers.IO) { repo.isBatteryUnrestricted() }
                 delay(1500)
             }
         }
