@@ -49,10 +49,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Emulator-test the RELEASE build (R8 minified + shrunk), not the debug
+      # APK: it is the binary the release pipeline signs and ships, so the
+      # test validates the real artifact; and it is ~8x smaller, which
+      # measurably shortens the Compose cold start that kept ANR'ing on the
+      # KVM-less software emulator (runs 99/101). Log.d/[dbg] lines survive
+      # R8 (no log stripping in proguard-rules.pro), and `adb install`
+      # accepts the unsigned APK.
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: app-debug
+          name: app-release-unsigned
           path: apk
 
       - name: Set up JDK 17
@@ -69,7 +76,7 @@ jobs:
           arch: x86_64
           profile: pixel_7
           emulator-boot-timeout: 1800
-          script: bash ci/emulator-test.sh apk/app-debug.apk
+          script: bash ci/emulator-test.sh apk/app-release-unsigned.apk
 
       - name: Upload test outputs
         if: always()
