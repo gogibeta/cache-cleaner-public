@@ -1,6 +1,7 @@
 package com.cachecleaner.app.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -559,10 +560,10 @@ class CacheClearEngine(private val appContext: Context) {
             val x = bounds.centerX().toFloat()
             val y = bounds.centerY().toFloat()
             val path = android.graphics.Path().apply { moveTo(x, y) }
-            val stroke = AccessibilityService.GestureDescription.StrokeDescription(
+            val stroke = GestureDescription.StrokeDescription(
                 path, 0, 50
             )
-            val gesture = AccessibilityService.GestureDescription.Builder()
+            val gesture = GestureDescription.Builder()
                 .addStroke(stroke)
                 .build()
             val service = CacheAccessService.instance ?: return false
@@ -571,10 +572,10 @@ class CacheClearEngine(private val appContext: Context) {
                 val latch = CompletableDeferred<Boolean>()
                 service.dispatchGesture(gesture,
                     object : AccessibilityService.GestureResultCallback() {
-                        override fun onCompleted(gestureDescription: AccessibilityService.GestureDescription?) {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
                             latch.complete(true)
                         }
-                        override fun onCancelled(gestureDescription: AccessibilityService.GestureDescription?) {
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
                             latch.complete(false)
                         }
                     }, null)
@@ -743,7 +744,7 @@ class CacheClearEngine(private val appContext: Context) {
                 } catch (_: Exception) { null } ?: continue
                 try {
                     val pkg = root.packageName?.toString() ?: ""
-                    if (!isSettingsPackage(pkg)) continue
+                    if (!isSettingsHost(pkg)) continue
                     val button = findClearCacheButton(root, pkg)
                     if (button != null) {
                         storageWatchdog?.cancel()
