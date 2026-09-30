@@ -1,5 +1,6 @@
 package com.cachecleaner.app.accessibility
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -140,6 +141,15 @@ class CacheClearEngine(private val appContext: Context) {
      */
     private var storageWatchdog: kotlinx.coroutines.Job? = null
     private var storageWaitLogged = false
+    /**
+     * Watchdog for "the Storage click succeeded but the Storage screen
+     * never appeared". Phone logs show this happening (click result=true,
+     * then silence): without a bound the engine sits in WAIT_STORAGE until
+     * the 30 s package timeout and the user has to intervene manually.
+     */
+    private var storageOpenWatchdog: kotlinx.coroutines.Job? = null
+    private var storageClickTime = 0L
+    private var storageScreenSeen = false
     // MIUI detection mirrors the reference: the
     // `ro.miui.ui.version.name` system property, not the manufacturer.
     private val miui: Boolean = detectMiui()
@@ -270,6 +280,8 @@ class CacheClearEngine(private val appContext: Context) {
         rebindSignal = null
         storageWatchdog?.cancel()
         storageWatchdog = null
+        storageOpenWatchdog?.cancel()
+        storageOpenWatchdog = null
     }
 
     /**
@@ -309,6 +321,10 @@ class CacheClearEngine(private val appContext: Context) {
             stage = Stage.WAIT_APP_INFO
             clearCacheClicked = false
             scrollTries = 0
+            storageScreenSeen = false
+            storageClickTime = 0L
+            storageOpenWatchdog?.cancel()
+            storageOpenWatchdog = null
             attemptSignal = CompletableDeferred()
             openAppDetails(pkg)
             val signal = try {
@@ -491,13 +507,20 @@ class CacheClearEngine(private val appContext: Context) {
         val storage = findStorageRow(root, eventPkg)
         if (storage == null) {
             // Not visible yet: scroll the App info list like the
-            // reference's scroll handler, then give up after 3 scrolls.
+            // reference's scroll handler, then give up after MAX_SCROLLS.
             if (scrollTries < MAX_SCROLLS && tryScrollForward(root)) {
                 scrollTries++
                 listener?.onLog("  [dbg] Storage row not visible, scrolling ($scrollTries/$MAX_SCROLLS)")
                 return
             }
+            // Log what IS on screen so we can diagnose why Storage wasn't
+            // found (e.g. different label on this OEM).
+            val visibleTexts = collectRowTexts(root).take(20)
             listener?.onLog("  [dbg] Storage row not found on App info")
+            FileLogger.log(
+                "engine", "storage row not found, visible rows",
+                data = mapOf("pkg" to targetPkg, "rows" to visibleTexts.joinToString(" | "))
+            )
             completeAttempt(AttemptSignal.STORAGE_MISSING)
             return
         }
@@ -522,9 +545,23 @@ class CacheClearEngine(private val appContext: Context) {
                     try { node.recycle() } catch (_: Exception) {}
                 }
                 listener?.onLog("  [dbg] Storage click dispatched, result=$clickResult")
+                if (!clickResult) {
+                    // The click didn't land (stale node, not yet laid out).
+                    // Don't advance to WAIT_STORAGE — the Storage screen will
+                    // never open. Fail this attempt with a retryable signal
+                    // so the package is reopened from a clean App info.
+                    listener?.onLog("  [dbg] Storage click failed, retrying package")
+                    completeAttempt(AttemptSignal.STORAGE_MISSING)
+                    return@launch
+                }
                 // Fire-and-forget like the reference: the Storage screen's
                 // own window-state-changed event drives the next stage.
+                // The storage-open watchdog (below) catches the case where
+                // the click "succeeded" but the screen never appears.
+                storageClickTime = SystemClock.uptimeMillis()
+                storageScreenSeen = false
                 advanceStage(Stage.WAIT_STORAGE)
+                startStorageOpenWatchdog()
             }
         } catch (_: Exception) {
             try { storage.recycle() } catch (_: Exception) {}
@@ -535,6 +572,13 @@ class CacheClearEngine(private val appContext: Context) {
 
     private fun handleStorageWindow(root: AccessibilityNodeInfo, eventPkg: String) {
         if (stage != Stage.WAIT_STORAGE) return
+        // The Storage screen is really here (we got a window event for it).
+        // Cancel the open-watchdog: the click did navigate.
+        if (!storageScreenSeen) {
+            storageScreenSeen = true
+            storageOpenWatchdog?.cancel()
+            storageOpenWatchdog = null
+        }
         val button = findClearCacheButton(root, eventPkg)
         if (button == null) {
             // The Storage screen populates asynchronously: the Clear-cache
@@ -571,6 +615,33 @@ class CacheClearEngine(private val appContext: Context) {
                 listener?.onLog("  [dbg] Clear-cache button never appeared, giving up")
                 FileLogger.log("engine", "storage settle timeout, Clear-cache button not found")
                 completeAttempt(AttemptSignal.CLEAR_CACHE_MISSING)
+            }
+        }
+    }
+
+    /**
+     * Fires if the Storage screen never appears after a successful Storage
+     * click. Presses back (to return to App info) and completes the attempt
+     * with TIMEOUT so the package is retried from a clean open instead of
+     * hanging until the 30 s package timeout.
+     */
+    private fun startStorageOpenWatchdog() {
+        storageOpenWatchdog?.cancel()
+        storageOpenWatchdog = scope.launch {
+            delay(STORAGE_OPEN_TIMEOUT_MS)
+            if (stage == Stage.WAIT_STORAGE && running && !storageScreenSeen) {
+                listener?.onLog("  [dbg] Storage screen never opened after click, going back")
+                FileLogger.log("engine", "storage open timeout, pressing back")
+                try {
+                    withContext(Dispatchers.Main) {
+                        CacheAccessService.instance?.performGlobalAction(
+                            AccessibilityService.GLOBAL_ACTION_BACK
+                        )
+                    }
+                } catch (_: Exception) {
+                }
+                delay(500)
+                completeAttempt(AttemptSignal.TIMEOUT)
             }
         }
     }
@@ -667,6 +738,8 @@ class CacheClearEngine(private val appContext: Context) {
         if (stage == Stage.WAIT_STORAGE && next != Stage.WAIT_STORAGE) {
             storageWatchdog?.cancel()
             storageWatchdog = null
+            storageOpenWatchdog?.cancel()
+            storageOpenWatchdog = null
         }
         stage = next
         handledWindowIds.clear()
@@ -695,6 +768,28 @@ class CacheClearEngine(private val appContext: Context) {
             }
         }
         return false
+    }
+
+    /**
+     * Collects the visible text of rows on the App info screen for
+     * diagnostics when the Storage row isn't found.
+     */
+    private fun collectRowTexts(root: AccessibilityNodeInfo): List<String> {
+        val out = mutableListOf<String>()
+        val deque = ArrayDeque<AccessibilityNodeInfo>()
+        deque.add(root)
+        while (deque.isNotEmpty() && out.size < 40) {
+            val n = deque.removeFirst()
+            try {
+                val t = n.text?.toString()?.trim()
+                if (!t.isNullOrEmpty() && t.length < 60) out.add(t)
+                for (i in 0 until n.childCount) {
+                    try { n.getChild(i)?.let { deque.add(it) } } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return out.distinct()
     }
 
     // -------------------------------------------------------------- node find
@@ -891,6 +986,15 @@ class CacheClearEngine(private val appContext: Context) {
         )
 
         /** Max scroll attempts looking for the Storage row. */
-        private const val MAX_SCROLLS = 3
+        private const val MAX_SCROLLS = 5
+
+        /**
+         * How long to wait for the Storage screen to appear after a
+         * successful Storage-row click before pressing back and retrying.
+         * Phone logs show the screen normally appears in <2 s; 8 s bounds
+         * the "click succeeded but nothing happened" hang without burning
+         * the full 30 s package timeout.
+         */
+        private const val STORAGE_OPEN_TIMEOUT_MS = 8000L
     }
 }
