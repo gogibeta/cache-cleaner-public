@@ -59,9 +59,12 @@ import kotlinx.coroutines.withTimeout
  *   strings.
  * - MIUI is detected via the `ro.miui.ui.version.name` system property,
  *   like the reference (and like AppSleep's `u.w()`).
- * - Per-package watchdog: 10 seconds. One reopen-and-retry per package.
+ * - Per-package watchdog: 10 seconds normally, 6 seconds in turbo mode.
+ *   One reopen-and-retry per package.
  * - Inter-package delay: 1000 ms normally, 0 ms in turbo mode.
- * - Pre-click delay: 100 ms normally, 50 ms in turbo mode.
+ * - Pre-click delay: 100 ms normally, 0 ms in turbo mode.
+ * - Confirmation-dialog watchdog after the clear click: 2500 ms normally,
+ *   600 ms in turbo mode.
  * - All clicks are fire-and-forget like the reference: the click result is
  *   not checked and there is no post-click verification. Once "Clear
  *   cache" is clicked the attempt counts as cleaned.
@@ -118,6 +121,13 @@ class CacheClearEngine(private val appContext: Context) {
     private var attemptSignal: CompletableDeferred<AttemptSignal>? = null
     private var clearCacheClicked = false
     private var scrollTries = 0
+    /**
+     * Completed by [onServiceRebound] when the accessibility service comes
+     * back after [onServiceUnbound] parked the current attempt with
+     * [AttemptSignal.SERVICE_LOST]. Null when no rebind is being awaited.
+     */
+    @Volatile
+    private var rebindSignal: CompletableDeferred<Unit>? = null
 
     private val handledWindowIds = mutableSetOf<Int>()
     private val settingsTextCache = mutableMapOf<String, Set<String>>()
@@ -249,6 +259,35 @@ class CacheClearEngine(private val appContext: Context) {
         currentPackage = null
         stage = Stage.IDLE
         attemptSignal = null
+        rebindSignal = null
+    }
+
+    /**
+     * Called by [CacheAccessService.onUnbind] on the main thread. If a
+     * package attempt is in flight, park it with [AttemptSignal.SERVICE_LOST]
+     * so [cleanOnePackage] can wait for the rebind instead of burning the
+     * per-package watchdog on a dead service (vivo battery management tears
+     * the service down ~0.1 s after App info opens).
+     */
+    fun onServiceUnbound() {
+        val s = attemptSignal
+        if (!running || s == null || s.isCompleted) return
+        FileLogger.log(
+            "engine", "service unbound mid-run, waiting for rebind",
+            data = mapOf("pkg" to targetPkg)
+        )
+        listener?.onLog("  [dbg] service unbound mid-run, waiting for rebind")
+        rebindSignal = CompletableDeferred()
+        s.complete(AttemptSignal.SERVICE_LOST)
+    }
+
+    /** Called by [CacheAccessService.onServiceConnected] on the main thread. */
+    fun onServiceRebound() {
+        val rs = rebindSignal
+        if (rs != null && !rs.isCompleted) {
+            FileLogger.log("engine", "service rebound")
+            rs.complete(Unit)
+        }
     }
 
     // ------------------------------------------------------------ one package
@@ -263,7 +302,7 @@ class CacheClearEngine(private val appContext: Context) {
             attemptSignal = CompletableDeferred()
             openAppDetails(pkg)
             val signal = try {
-                withTimeout(AutomationPolicy.PACKAGE_TIMEOUT_MS) {
+                withTimeout(AutomationPolicy.packageTimeoutMs(turbo)) {
                     attemptSignal!!.await()
                 }
             } catch (_: TimeoutCancellationException) {
@@ -278,6 +317,29 @@ class CacheClearEngine(private val appContext: Context) {
                     "retried" to retried.toString()
                 )
             )
+            if (signal == AttemptSignal.SERVICE_LOST) {
+                // The accessibility service was torn down mid-attempt (vivo
+                // battery management). Wait for the rebind, then retry this
+                // package from a clean App info open.
+                val rs = rebindSignal
+                val rebound = if (rs == null) false else try {
+                    withTimeout(15000) { rs.await() }
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+                rebindSignal = null
+                if (rebound) {
+                    listener?.onLog("  [dbg] service rebound, retrying ${appLabel(pkg)}")
+                    FileLogger.log("engine", "service rebound, retrying package", data = mapOf("pkg" to pkg))
+                    retried = true
+                    handledWindowIds.clear()
+                    continue
+                }
+                listener?.onLog("  [dbg] service did not rebound, failing ${appLabel(pkg)}")
+                FileLogger.log("engine", "service did not rebound, failing package", data = mapOf("pkg" to pkg))
+                return PackageOutcome.FAILED
+            }
             when (val step = nextStep(signal, retried, miui)) {
                 is Step.Terminal -> {
                     if (step.outcome != PackageOutcome.CLEANED) {
@@ -459,39 +521,46 @@ class CacheClearEngine(private val appContext: Context) {
     }
 
     private fun clickClearCache(button: AccessibilityNodeInfo) {
-        try {
-            if (!button.isEnabled) {
-                listener?.onLog("  [dbg] Clear-cache button found but DISABLED")
-                completeAttempt(AttemptSignal.CLEAR_CACHE_MISSING)
-                return
-            }
-            val node = button
-            scope.launch {
-                delay(AutomationPolicy.preClickDelayMs(turbo))
-                val clickResult = try {
-                    withContext(Dispatchers.Main) {
-                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    }
-                } catch (_: Exception) {
-                    false
-                } finally {
+        val node = button
+        scope.launch {
+            // The button can be momentarily disabled while the screen is
+            // still settling (seen on vivo). Re-check after a short pause;
+            // a persistently disabled Clear-cache button means the app has
+            // nothing to clear — skip it, don't fail it.
+            val disabled = try { !node.isEnabled } catch (_: Exception) { true }
+            if (disabled) {
+                delay(800)
+                val stillDisabled = try { !node.isEnabled } catch (_: Exception) { true }
+                if (stillDisabled) {
                     try { node.recycle() } catch (_: Exception) {}
+                    listener?.onLog("  [dbg] Clear-cache button disabled, already clean, skipping")
+                    completeAttempt(AttemptSignal.SKIPPED_CLEAN)
+                    return@launch
                 }
-                listener?.onLog("  [dbg] Clear-cache click dispatched, result=$clickResult")
-                // Fire-and-forget like the reference: the click result is
-                // not checked. A confirmation dialog may or may not appear;
-                // the dialog stage handles it, and its watchdog completes
-                // the attempt either way.
-                clearCacheClicked = true
-                advanceStage(Stage.WAIT_DIALOG)
-                delay(DIALOG_WATCHDOG_MS)
-                if (stage == Stage.WAIT_DIALOG && clearCacheClicked) {
-                    listener?.onLog("  [dbg] no confirmation dialog appeared, finishing package")
-                    completeAttempt(AttemptSignal.CACHE_CLEARED)
-                }
+                // Enabled now — fall through and click it.
             }
-        } catch (_: Exception) {
-            try { button.recycle() } catch (_: Exception) {}
+            delay(AutomationPolicy.preClickDelayMs(turbo))
+            val clickResult = try {
+                withContext(Dispatchers.Main) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+            } catch (_: Exception) {
+                false
+            } finally {
+                try { node.recycle() } catch (_: Exception) {}
+            }
+            listener?.onLog("  [dbg] Clear-cache click dispatched, result=$clickResult")
+            // Fire-and-forget like the reference: the click result is
+            // not checked. A confirmation dialog may or may not appear;
+            // the dialog stage handles it, and its watchdog completes
+            // the attempt either way.
+            clearCacheClicked = true
+            advanceStage(Stage.WAIT_DIALOG)
+            delay(AutomationPolicy.dialogWatchdogMs(turbo))
+            if (stage == Stage.WAIT_DIALOG && clearCacheClicked) {
+                listener?.onLog("  [dbg] no confirmation dialog appeared, finishing package")
+                completeAttempt(AttemptSignal.CACHE_CLEARED)
+            }
         }
     }
 
@@ -753,8 +822,5 @@ class CacheClearEngine(private val appContext: Context) {
 
         /** Max scroll attempts looking for the Storage row. */
         private const val MAX_SCROLLS = 3
-
-        /** How long to wait for a confirmation dialog after the clear click. */
-        private const val DIALOG_WATCHDOG_MS = 2500L
     }
 }

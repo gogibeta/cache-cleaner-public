@@ -46,11 +46,19 @@ class CacheAccessService : AccessibilityService() {
         // on the user's device within a second of every toggle.
         // The engine ignores events while no run is active, so the static
         // mask costs nothing when idle.
+        try {
+            CacheClearEngineHolder.engine?.onServiceRebound()
+        } catch (_: Exception) {
+        }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
         FileLogger.log("a11y", "service UNBOUND by system — automation will stop working until rebound", level = "WARN")
         if (instance === this) instance = null
+        try {
+            CacheClearEngineHolder.engine?.onServiceUnbound()
+        } catch (_: Exception) {
+        }
         return super.onUnbind(intent)
     }
 

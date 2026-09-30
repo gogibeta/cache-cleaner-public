@@ -96,9 +96,21 @@ class CacheCleanerLogicTest {
     }
 
     @Test
-    fun policy_preClickDelay_normalIs100_turboIs50() {
+    fun policy_preClickDelay_normalIs100_turboIs0() {
         assertEquals(100L, AutomationPolicy.preClickDelayMs(false))
-        assertEquals(50L, AutomationPolicy.preClickDelayMs(true))
+        assertEquals(0L, AutomationPolicy.preClickDelayMs(true))
+    }
+
+    @Test
+    fun policy_packageTimeout_normalIs10s_turboIs6s() {
+        assertEquals(10000L, AutomationPolicy.packageTimeoutMs(false))
+        assertEquals(6000L, AutomationPolicy.packageTimeoutMs(true))
+    }
+
+    @Test
+    fun policy_dialogWatchdog_normalIs2500_turboIs600() {
+        assertEquals(2500L, AutomationPolicy.dialogWatchdogMs(false))
+        assertEquals(600L, AutomationPolicy.dialogWatchdogMs(true))
     }
 
     @Test
@@ -277,6 +289,28 @@ class CacheCleanerLogicTest {
                 nextStep(signal, true, true)
             )
         }
+    }
+
+    @Test
+    fun nextStep_skippedClean_alwaysSkippedNoRetry() {
+        // A disabled Clear-cache button means "already clean": terminal
+        // SKIPPED whether or not a retry already happened.
+        assertEquals(
+            Step.Terminal(PackageOutcome.SKIPPED),
+            nextStep(AttemptSignal.SKIPPED_CLEAN, false, false)
+        )
+        assertEquals(
+            Step.Terminal(PackageOutcome.SKIPPED),
+            nextStep(AttemptSignal.SKIPPED_CLEAN, true, true)
+        )
+    }
+
+    @Test
+    fun nextStep_serviceLost_mapsToRetry() {
+        // SERVICE_LOST is normally handled inline by the engine (wait for
+        // rebind); the policy mapping just keeps the when exhaustive.
+        assertEquals(Step.Retry, nextStep(AttemptSignal.SERVICE_LOST, false, false))
+        assertEquals(Step.Retry, nextStep(AttemptSignal.SERVICE_LOST, true, true))
     }
 
     // ---------- run marker ----------

@@ -58,6 +58,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val _a11yEnabled = MutableStateFlow(false)
     val a11yEnabled: StateFlow<Boolean> = _a11yEnabled.asStateFlow()
 
+    /** True when the app is exempt from battery optimizations ("Unrestricted"). */
+    private val _batteryUnrestricted = MutableStateFlow(true)
+    val batteryUnrestricted: StateFlow<Boolean> = _batteryUnrestricted.asStateFlow()
+
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
 
@@ -74,6 +78,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     val logLines: StateFlow<Long> = _logLines.asStateFlow()
 
     private var monitorJob: Job? = null
+
+    /** Raw "[dbg] run finished:" marker already acted on (dedup). */
+    private var lastRunMarkerSeen: String? = null
 
     init {
         viewModelScope.launch {
@@ -96,6 +103,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _a11yEnabled.value = withContext(Dispatchers.IO) {
             CacheAccessService.isEnabled(getApplication())
         }
+        _batteryUnrestricted.value = withContext(Dispatchers.IO) { repo.isBatteryUnrestricted() }
     }
 
     private suspend fun loadApps() {
@@ -122,14 +130,25 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 if (v != _logVersion.value) {
                     _logVersion.value = v
                     // Pick up the finished-run marker as a success summary.
-                    RunLog.snapshot().lastOrNull { it.startsWith("[dbg] run finished:") }
-                        ?.removePrefix("[dbg] ")
-                        ?.let { parseRunSummary(it) }
-                        ?.let { _lastSummary.value = it }
+                    // Act on each marker exactly once: a fresh marker means
+                    // the run just finished, so rescan — the list's cache
+                    // numbers and running states are stale now.
+                    val marker = RunLog.snapshot().lastOrNull { it.startsWith("[dbg] run finished:") }
+                    if (marker == null) {
+                        // Log was cleared (a new run started): forget the old marker.
+                        lastRunMarkerSeen = null
+                    } else if (marker != lastRunMarkerSeen) {
+                        lastRunMarkerSeen = marker
+                        marker.removePrefix("[dbg] ")
+                            .let { parseRunSummary(it) }
+                            ?.let { _lastSummary.value = it }
+                        viewModelScope.launch { loadApps() }
+                    }
                 }
                 _logLines.value = withContext(Dispatchers.IO) { FileLogger.lineCount() }
                 // Refresh access states cheaply while visible.
                 _a11yEnabled.value = CacheAccessService.isEnabled(getApplication())
+                _batteryUnrestricted.value = withContext(Dispatchers.IO) { repo.isBatteryUnrestricted() }
                 delay(1500)
             }
         }

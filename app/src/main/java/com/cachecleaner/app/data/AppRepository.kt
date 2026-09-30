@@ -73,6 +73,22 @@ class AppRepository(private val context: Context) {
     }
 
     /**
+     * True when the app is exempt from battery optimizations
+     * ("Unrestricted" in Settings > Battery). Vivo/Funtouch kills
+     * battery-optimized background apps aggressively, which tears down the
+     * accessibility service mid-run. Unknown -> true so we don't nag when
+     * the state can't be read.
+     */
+    fun isBatteryUnrestricted(): Boolean {
+        return try {
+            val power = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            power.isIgnoringBatteryOptimizations(context.packageName)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /**
      * Packages with a MOVE_TO_FOREGROUND event in the last 24h.
      * Refines the "running" signal: FLAG_STOPPED alone marks dead apps as
      * running, while getRunningAppProcesses() is restricted on Android 7+

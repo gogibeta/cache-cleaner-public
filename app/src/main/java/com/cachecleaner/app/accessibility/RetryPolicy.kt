@@ -7,9 +7,12 @@ package com.cachecleaner.app.accessibility
  *   terminal outcome.
  * - A successful "Clear cache" click is terminal: the click is
  *   fire-and-forget, there is no post-click verification.
- *
- * Kept in its own file (no Android dependencies) so it can be unit-tested
- * on the JVM.
+ * - A disabled "Clear cache" button means the app has nothing to clear:
+ *   terminal SKIPPED, never retried (retrying a disabled button just
+ *   burns the per-package watchdog).
+ * - SERVICE_LOST (accessibility service unbound mid-attempt) is handled
+ *   inline by the engine (wait for rebind, then retry the package); the
+ *   mapping here only keeps the `when` exhaustive.
  */
 
 /** Internal signals driving one package attempt. */
@@ -17,7 +20,11 @@ internal enum class AttemptSignal {
     STORAGE_MISSING,
     CLEAR_CACHE_MISSING,
     CACHE_CLEARED,
-    TIMEOUT
+    TIMEOUT,
+    /** Clear-cache button persistently disabled: nothing to clear. */
+    SKIPPED_CLEAN,
+    /** Accessibility service unbound mid-attempt (handled inline). */
+    SERVICE_LOST
 }
 
 /** What the engine should do after an attempt signal. */
@@ -35,6 +42,8 @@ internal fun nextStep(
     @Suppress("UNUSED_PARAMETER") isMiui: Boolean
 ): Step = when (signal) {
     AttemptSignal.CACHE_CLEARED -> Step.Terminal(PackageOutcome.CLEANED)
+    AttemptSignal.SKIPPED_CLEAN -> Step.Terminal(PackageOutcome.SKIPPED)
+    AttemptSignal.SERVICE_LOST -> Step.Retry
     AttemptSignal.STORAGE_MISSING,
     AttemptSignal.CLEAR_CACHE_MISSING,
     AttemptSignal.TIMEOUT ->

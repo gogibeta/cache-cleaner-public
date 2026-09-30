@@ -6,10 +6,13 @@ package com.cachecleaner.app.accessibility
  * The timing values below mirror the publicly observable behavior of the
  * reference app (XCleaner 2.6, reverse-engineered for interoperability):
  *
- * - Per-package watchdog: 10 seconds (the Storage screen can be slow).
+ * - Per-package watchdog: 10 seconds normally, 6 seconds in turbo mode
+ *   (the Storage screen can be slow).
  * - Inter-package delay: 1000 ms normally, 0 ms in turbo mode.
  * - Pre-click delay (Storage / Clear cache / dialog OK): 100 ms normally,
- *   50 ms in turbo mode.
+ *   0 ms in turbo mode.
+ * - Confirmation-dialog watchdog after the clear click: 2500 ms normally,
+ *   600 ms in turbo mode.
  *
  * Event-type handling: the service declares the full mask
  * (window-state-changed + view-scrolled + window-content-changed) statically
@@ -19,8 +22,11 @@ package com.cachecleaner.app.accessibility
  */
 object AutomationPolicy {
 
-    /** Per-package watchdog in milliseconds. */
+    /** Per-package watchdog in milliseconds, normal mode. */
     const val PACKAGE_TIMEOUT_MS = 10000L
+
+    /** Per-package watchdog in milliseconds, turbo mode. */
+    const val TURBO_PACKAGE_TIMEOUT_MS = 6000L
 
     /** Inter-package delay, normal mode. */
     const val NORMAL_INTER_DELAY_MS = 1000L
@@ -32,7 +38,13 @@ object AutomationPolicy {
     const val NORMAL_PRE_CLICK_DELAY_MS = 100L
 
     /** Pre-click delay, turbo mode. */
-    const val TURBO_PRE_CLICK_DELAY_MS = 50L
+    const val TURBO_PRE_CLICK_DELAY_MS = 0L
+
+    /** Confirmation-dialog watchdog after the clear click, normal mode. */
+    const val NORMAL_DIALOG_WATCHDOG_MS = 2500L
+
+    /** Confirmation-dialog watchdog after the clear click, turbo mode. */
+    const val TURBO_DIALOG_WATCHDOG_MS = 600L
 
     const val EVENT_WINDOW_STATE_CHANGED = 32
     const val EVENT_WINDOW_CONTENT_CHANGED = 2048
@@ -48,6 +60,14 @@ object AutomationPolicy {
     /** Pre-click delay for the current mode. */
     fun preClickDelayMs(turbo: Boolean): Long =
         if (turbo) TURBO_PRE_CLICK_DELAY_MS else NORMAL_PRE_CLICK_DELAY_MS
+
+    /** Per-package watchdog for the current mode. */
+    fun packageTimeoutMs(turbo: Boolean): Long =
+        if (turbo) TURBO_PACKAGE_TIMEOUT_MS else PACKAGE_TIMEOUT_MS
+
+    /** Confirmation-dialog watchdog for the current mode. */
+    fun dialogWatchdogMs(turbo: Boolean): Long =
+        if (turbo) TURBO_DIALOG_WATCHDOG_MS else NORMAL_DIALOG_WATCHDOG_MS
 
     /** Enable window-content-changed events on the given event-type mask. */
     fun withContentChanged(eventTypes: Int): Int =

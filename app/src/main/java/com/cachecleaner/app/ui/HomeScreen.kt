@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -94,6 +95,7 @@ fun HomeScreen(
     val running by vm.running.collectAsState()
     val hasUsage by vm.hasUsageAccess.collectAsState()
     val a11y by vm.a11yEnabled.collectAsState()
+    val batteryUnrestricted by vm.batteryUnrestricted.collectAsState()
     val query by vm.query.collectAsState()
     val logVersion by vm.logVersion.collectAsState()
     val lastSummary by vm.lastSummary.collectAsState()
@@ -151,16 +153,30 @@ fun HomeScreen(
             item { CacheCard(totalCache = totalCache, hasUsage = hasUsage) }
 
             // ---- setup checklist ----
-            if (!hasUsage || !a11y) {
+            if (!hasUsage || !a11y || !batteryUnrestricted) {
                 item {
                     SetupCard(
                         hasUsage = hasUsage,
                         a11y = a11y,
+                        batteryUnrestricted = batteryUnrestricted,
                         onGrantUsage = { vm.openUsageSettings() },
                         onOpenA11y = {
                             try {
                                 context.startActivity(
                                     Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            } catch (_: Exception) {
+                            }
+                        },
+                        onAllowBattery = {
+                            try {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:${context.packageName}")
+                                    ).apply {
                                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     }
                                 )
@@ -340,8 +356,10 @@ private fun CacheCard(totalCache: Long, hasUsage: Boolean) {
 private fun SetupCard(
     hasUsage: Boolean,
     a11y: Boolean,
+    batteryUnrestricted: Boolean,
     onGrantUsage: () -> Unit,
-    onOpenA11y: () -> Unit
+    onOpenA11y: () -> Unit,
+    onAllowBattery: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -364,6 +382,13 @@ private fun SetupCard(
                 text = stringResource(R.string.setup_a11y),
                 actionText = stringResource(R.string.open_settings),
                 onAction = onOpenA11y
+            )
+            SetupRow(
+                done = batteryUnrestricted,
+                text = stringResource(R.string.setup_battery_title) + "\n" +
+                    stringResource(R.string.setup_battery_body),
+                actionText = stringResource(R.string.allow_unrestricted),
+                onAction = onAllowBattery
             )
         }
     }
