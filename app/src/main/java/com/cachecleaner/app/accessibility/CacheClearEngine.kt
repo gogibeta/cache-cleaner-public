@@ -552,7 +552,7 @@ class CacheClearEngine(private val appContext: Context) {
             val bounds = android.graphics.Rect()
             node.getBoundsInScreen(bounds)
             // Refuse degenerate bounds (SD Maid defense-in-depth).
-            if (bounds.isEmpty || bounds.width() < 2 || bounds.height() < 2) {
+            if (bounds.isEmpty() || bounds.width() < 2 || bounds.height() < 2) {
                 listener?.onLog("  [dbg] gesture tap refused: empty bounds")
                 return false
             }
