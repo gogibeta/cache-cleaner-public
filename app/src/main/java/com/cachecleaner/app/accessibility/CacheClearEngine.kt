@@ -699,23 +699,68 @@ class CacheClearEngine(private val appContext: Context) {
             // The Storage screen populates asynchronously: the Clear-cache
             // button is often missing from the first window event but
             // appears once storage stats finish computing (1-3 s on cold
-            // load). Wait for it (bounded) instead of failing immediately —
-            // the instant CLEAR_CACHE_MISSING was the top failure mode in
-            // phone logs. Subsequent window-content-changed events re-enter
-            // here; the watchdog below bounds the wait if the screen goes
-            // quiet.
+            // load). Don't just wait for events (unreliable on vivo) —
+            // aggressively poll rootInActiveWindow every 100 ms. This is
+            // much faster than waiting for content-changed events that
+            // may never arrive.
             if (!storageWaitLogged) {
                 storageWaitLogged = true
-                listener?.onLog("  [dbg] Storage screen shown, waiting for Clear-cache button")
+                listener?.onLog("  [dbg] Storage screen shown, polling for Clear-cache button")
             }
+            startStoragePolling()
             startStorageWatchdog()
             return
         }
         storageWatchdog?.cancel()
         storageWatchdog = null
+        storagePollJob?.cancel()
+        storagePollJob = null
         markHandled(button)
         listener?.onLog("  [dbg] Clear-cache button found, clicking")
         clickClearCache(button)
+    }
+
+    /**
+     * Aggressively polls for the Clear-cache button every 100 ms.
+     * Window-content-changed events are unreliable on vivo/OriginOS —
+     * polling rootInActiveWindow directly is faster and more reliable.
+     * Cancels itself when the button is found or the stage changes.
+     */
+    private var storagePollJob: kotlinx.coroutines.Job? = null
+
+    private fun startStoragePolling() {
+        if (storagePollJob?.isActive == true) return
+        storagePollJob = scope.launch {
+            val deadline = SystemClock.uptimeMillis() + AutomationPolicy.STORAGE_SETTLE_TIMEOUT_MS
+            while (stage == Stage.WAIT_STORAGE && running &&
+                   SystemClock.uptimeMillis() < deadline) {
+                delay(100)
+                if (stage != Stage.WAIT_STORAGE || !running) break
+                val root = try {
+                    withContext(Dispatchers.Main) {
+                        CacheAccessService.instance?.rootInActiveWindow
+                    }
+                } catch (_: Exception) { null } ?: continue
+                try {
+                    val pkg = root.packageName?.toString() ?: ""
+                    if (!isSettingsPackage(pkg)) continue
+                    val button = findClearCacheButton(root, pkg)
+                    if (button != null) {
+                        storageWatchdog?.cancel()
+                        storageWatchdog = null
+                        storagePollJob = null
+                        markHandled(button)
+                        listener?.onLog("  [dbg] Clear-cache button found via polling, clicking")
+                        clickClearCache(button)
+                        try { root.recycle() } catch (_: Exception) {}
+                        return@launch
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    try { root.recycle() } catch (_: Exception) {}
+                }
+            }
+        }
     }
 
     /**
@@ -813,12 +858,49 @@ class CacheClearEngine(private val appContext: Context) {
                 // (The dialog watchdog below will complete the attempt.)
             }
             // Fire-and-forget like the reference: a confirmation dialog may
-            // or may not appear; the dialog stage handles it, and its
-            // watchdog completes the attempt either way.
+            // or may not appear. Poll aggressively for it instead of
+            // waiting the full watchdog — if no dialog in 400 ms, assume
+            // the cache was cleared and move on. This is faster than the
+            // fixed 600 ms wait and still catches slow dialogs.
             clearCacheClicked = true
             advanceStage(Stage.WAIT_DIALOG)
-            delay(AutomationPolicy.dialogWatchdogMs(turbo))
-            if (stage == Stage.WAIT_DIALOG && clearCacheClicked) {
+            val dialogDeadline = SystemClock.uptimeMillis() + DIALOG_FAST_CHECK_MS
+            var dialogFound = false
+            while (stage == Stage.WAIT_DIALOG && clearCacheClicked &&
+                   SystemClock.uptimeMillis() < dialogDeadline) {
+                delay(100)
+                if (stage != Stage.WAIT_DIALOG || !clearCacheClicked) break
+                // Check if a dialog appeared by polling root.
+                val dialogRoot = try {
+                    withContext(Dispatchers.Main) {
+                        CacheAccessService.instance?.rootInActiveWindow
+                    }
+                } catch (_: Exception) { null }
+                if (dialogRoot != null) {
+                    try {
+                        val ok = findDialogOkButton(dialogRoot)
+                        if (ok != null) {
+                            dialogFound = true
+                            try { dialogRoot.recycle() } catch (_: Exception) {}
+                            markHandled(ok)
+                            listener?.onLog("  [dbg] dialog found via polling, clicking OK")
+                            val okNode = ok
+                            try {
+                                robustClick(okNode)
+                            } catch (_: Exception) {
+                            } finally {
+                                try { okNode.recycle() } catch (_: Exception) {}
+                            }
+                            completeAttempt(AttemptSignal.CACHE_CLEARED)
+                            return@launch
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        try { dialogRoot.recycle() } catch (_: Exception) {}
+                    }
+                }
+            }
+            if (stage == Stage.WAIT_DIALOG && clearCacheClicked && !dialogFound) {
                 listener?.onLog("  [dbg] no confirmation dialog appeared, finishing package")
                 completeAttempt(AttemptSignal.CACHE_CLEARED)
             }
@@ -925,6 +1007,8 @@ class CacheClearEngine(private val appContext: Context) {
             storageWatchdog = null
             storageOpenWatchdog?.cancel()
             storageOpenWatchdog = null
+            storagePollJob?.cancel()
+            storagePollJob = null
         }
         stage = next
         handledWindowIds.clear()
@@ -1228,5 +1312,12 @@ class CacheClearEngine(private val appContext: Context) {
 
         /** Delay between click retries. */
         private const val CLICK_RETRY_DELAY_MS = 300L
+
+        /**
+         * Fast dialog check: poll for confirmation dialog for this long
+         * after Clear-cache click. If no dialog appears, assume success.
+         * Faster than the full dialog watchdog (600 ms turbo).
+         */
+        private const val DIALOG_FAST_CHECK_MS = 400L
     }
 }

@@ -43,7 +43,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val _whitelist = MutableStateFlow<Set<String>>(emptySet())
     val whitelist: StateFlow<Set<String>> = _whitelist.asStateFlow()
 
-    private val _turbo = MutableStateFlow(false)
+    private val _turbo = MutableStateFlow(true)
     val turbo: StateFlow<Boolean> = _turbo.asStateFlow()
 
     private val _running = MutableStateFlow(false)

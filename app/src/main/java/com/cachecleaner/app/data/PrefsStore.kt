@@ -34,7 +34,7 @@ class PrefsStore(private val context: Context) {
         context.prefs.data.map { it[KEY_WHITELIST] ?: emptySet() }
 
     val turbo: Flow<Boolean> =
-        context.prefs.data.map { it[KEY_TURBO] ?: false }
+        context.prefs.data.map { it[KEY_TURBO] ?: true }
 
     /**
      * When the last stop run finished (epoch millis). The reference default

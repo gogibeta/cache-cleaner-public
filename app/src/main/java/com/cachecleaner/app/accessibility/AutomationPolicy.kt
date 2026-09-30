@@ -51,11 +51,11 @@ object AutomationPolicy {
      * screen before giving up with CLEAR_CACHE_MISSING. The Storage screen
      * populates asynchronously (storage stats compute in the background),
      * so the button is often missing from the first window event but
-     * appears a second or two later. Phone logs showed the instant
-     * give-up was the top failure mode (34 failed packages in one run).
-     * Must be shorter than the per-package watchdog (6 s turbo).
+     * appears a second or two later. With aggressive 100 ms polling,
+     * 2.5 s is plenty — the old 4 s was for unreliable event-driven
+     * waiting. Must be shorter than the per-package watchdog (6 s turbo).
      */
-    const val STORAGE_SETTLE_TIMEOUT_MS = 4000L
+    const val STORAGE_SETTLE_TIMEOUT_MS = 2500L
 
     const val EVENT_WINDOW_STATE_CHANGED = 32
     const val EVENT_WINDOW_CONTENT_CHANGED = 2048
