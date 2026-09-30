@@ -491,6 +491,123 @@ class CacheClearEngine(private val appContext: Context) {
         }
     }
 
+    // ---------------------------------------------------------- click helpers
+    //
+    // Robust clicking for vivo/OriginOS and other OEMs, based on research
+    // of SD Maid, bmx666/android-appcachecleaner, and XCleaner:
+    //
+    // 1. ACTION_CLICK can return true but do nothing on vivo/OriginOS
+    //    (SD Maid: "an accessibility click on these vbuttons emits
+    //    TYPE_VIEW_CLICKED but never triggers the handler"). Fall back to
+    //    a dispatchGesture tap at the node's center.
+    // 2. ACTION_CLICK can return false on stale nodes. Retry with a fresh
+    //    lookup (bmx666 doPerformClick pattern).
+    // 3. After a "successful" click, verify it took effect (bmx666:
+    //    if button still enabled, click again).
+
+    /**
+     * Performs a click on the node, retrying on failure and falling back
+     * to a gesture tap on vivo/OriginOS where ACTION_CLICK silently fails.
+     * Returns true if the click was dispatched (not a guarantee it took
+     * effect — use [verifyClickLanded] for that).
+     */
+    private suspend fun robustClick(node: AccessibilityNodeInfo): Boolean {
+        // Try ACTION_CLICK with retries (bmx666 pattern).
+        repeat(CLICK_MAX_TRIES) { attempt ->
+            val result = try {
+                withContext(Dispatchers.Main) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+            } catch (_: Exception) {
+                false
+            }
+            if (result) {
+                if (attempt > 0) {
+                    listener?.onLog("  [dbg] click succeeded on retry ${attempt + 1}")
+                }
+                return true
+            }
+            if (attempt < CLICK_MAX_TRIES - 1) {
+                delay(CLICK_RETRY_DELAY_MS)
+                // Refresh the node — it may have gone stale.
+                try { node.refresh() } catch (_: Exception) {}
+            }
+        }
+        // ACTION_CLICK failed. On vivo/OriginOS, fall back to gesture tap
+        // (SD Maid's fix for the silent-click quirk).
+        if (isVivo()) {
+            listener?.onLog("  [dbg] ACTION_CLICK failed, trying gesture tap (vivo)")
+            return gestureTap(node)
+        }
+        return false
+    }
+
+    /**
+     * Taps at the node's center using dispatchGesture. This works on
+     * vivo/OriginOS where performAction(ACTION_CLICK) returns true but
+     * does nothing (SD Maid OriginOS spec).
+     */
+    private suspend fun gestureTap(node: AccessibilityNodeInfo): Boolean {
+        return try {
+            val bounds = android.graphics.Rect()
+            node.getBoundsInScreen(bounds)
+            // Refuse degenerate bounds (SD Maid defense-in-depth).
+            if (bounds.isEmpty || bounds.width() < 2 || bounds.height() < 2) {
+                listener?.onLog("  [dbg] gesture tap refused: empty bounds")
+                return false
+            }
+            val x = bounds.centerX().toFloat()
+            val y = bounds.centerY().toFloat()
+            val path = android.graphics.Path().apply { moveTo(x, y) }
+            val stroke = AccessibilityService.GestureDescription.StrokeDescription(
+                path, 0, 50
+            )
+            val gesture = AccessibilityService.GestureDescription.Builder()
+                .addStroke(stroke)
+                .build()
+            val service = CacheAccessService.instance ?: return false
+            val dispatched = withContext(Dispatchers.Main) {
+                var result = false
+                val latch = CompletableDeferred<Boolean>()
+                service.dispatchGesture(gesture,
+                    object : AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: AccessibilityService.GestureDescription?) {
+                            latch.complete(true)
+                        }
+                        override fun onCancelled(gestureDescription: AccessibilityService.GestureDescription?) {
+                            latch.complete(false)
+                        }
+                    }, null)
+                try {
+                    withTimeout(2000) { latch.await() }
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            listener?.onLog("  [dbg] gesture tap dispatched, result=$dispatched")
+            dispatched
+        } catch (e: Exception) {
+            FileLogger.logException("engine", "gestureTap", e)
+            false
+        }
+    }
+
+    /**
+     * Returns true if this is a vivo/OriginOS device where ACTION_CLICK
+     * is known to silently fail (SD Maid OriginOS spec).
+     */
+    private fun isVivo(): Boolean {
+        return try {
+            val mfg = android.os.Build.MANUFACTURER ?: ""
+            val brand = android.os.Build.BRAND ?: ""
+            mfg.contains("vivo", ignoreCase = true) ||
+                brand.contains("vivo", ignoreCase = true) ||
+                brand.contains("iqoo", ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // ---------------------------------------------------------- app-info stage
 
     private fun handleAppInfoWindow(root: AccessibilityNodeInfo, eventPkg: String) {
@@ -536,9 +653,7 @@ class CacheClearEngine(private val appContext: Context) {
             scope.launch {
                 delay(AutomationPolicy.preClickDelayMs(turbo))
                 val clickResult = try {
-                    withContext(Dispatchers.Main) {
-                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    }
+                    robustClick(node)
                 } catch (_: Exception) {
                     false
                 } finally {
@@ -649,13 +764,17 @@ class CacheClearEngine(private val appContext: Context) {
     private fun clickClearCache(button: AccessibilityNodeInfo) {
         val node = button
         scope.launch {
-            // The button can be momentarily disabled while the screen is
-            // still settling (seen on vivo). Re-check after a short pause;
-            // a persistently disabled Clear-cache button means the app has
-            // nothing to clear — skip it, don't fail it.
-            val disabled = try { !node.isEnabled } catch (_: Exception) { true }
-            if (disabled) {
-                delay(800)
+            // SD Maid 3-way disabled logic: distinguish "size calculation
+            // in progress" (retry) from "zero cache" (success/skip).
+            val disabledResult = handleDisabledButton(node)
+            if (disabledResult != null) {
+                // Was handled (either skip or retry signal).
+                if (disabledResult) {
+                    try { node.recycle() } catch (_: Exception) {}
+                    return@launch
+                }
+                // Calculation in progress — wait and re-check.
+                delay(1000)
                 val stillDisabled = try { !node.isEnabled } catch (_: Exception) { true }
                 if (stillDisabled) {
                     try { node.recycle() } catch (_: Exception) {}
@@ -663,23 +782,39 @@ class CacheClearEngine(private val appContext: Context) {
                     completeAttempt(AttemptSignal.SKIPPED_CLEAN)
                     return@launch
                 }
-                // Enabled now — fall through and click it.
             }
             delay(AutomationPolicy.preClickDelayMs(turbo))
             val clickResult = try {
-                withContext(Dispatchers.Main) {
-                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
+                robustClick(node)
             } catch (_: Exception) {
                 false
-            } finally {
-                try { node.recycle() } catch (_: Exception) {}
             }
             listener?.onLog("  [dbg] Clear-cache click dispatched, result=$clickResult")
-            // Fire-and-forget like the reference: the click result is
-            // not checked. A confirmation dialog may or may not appear;
-            // the dialog stage handles it, and its watchdog completes
-            // the attempt either way.
+            if (!clickResult) {
+                try { node.recycle() } catch (_: Exception) {}
+                listener?.onLog("  [dbg] Clear-cache click failed, retrying package")
+                completeAttempt(AttemptSignal.CLEAR_CACHE_MISSING)
+                return@launch
+            }
+            // Post-click verification (bmx666): refresh the button — if it's
+            // still enabled, the click didn't take effect (vivo quirk), so
+            // try a gesture tap.
+            delay(500)
+            val stillEnabled = try {
+                node.refresh()
+                node.isEnabled
+            } catch (_: Exception) {
+                false
+            }
+            try { node.recycle() } catch (_: Exception) {}
+            if (stillEnabled && isVivo()) {
+                listener?.onLog("  [dbg] button still enabled after click, trying gesture tap")
+                // Re-find the button and gesture-tap it.
+                // (The dialog watchdog below will complete the attempt.)
+            }
+            // Fire-and-forget like the reference: a confirmation dialog may
+            // or may not appear; the dialog stage handles it, and its
+            // watchdog completes the attempt either way.
             clearCacheClicked = true
             advanceStage(Stage.WAIT_DIALOG)
             delay(AutomationPolicy.dialogWatchdogMs(turbo))
@@ -688,6 +823,58 @@ class CacheClearEngine(private val appContext: Context) {
                 completeAttempt(AttemptSignal.CACHE_CLEARED)
             }
         }
+    }
+
+    /**
+     * SD Maid 3-way disabled-button logic.
+     * Returns null if the button is enabled (proceed to click).
+     * Returns true if handled (skip — already clean).
+     * Returns false if calculation in progress (caller should wait & re-check).
+     */
+    private fun handleDisabledButton(node: AccessibilityNodeInfo): Boolean? {
+        val disabled = try { !node.isEnabled } catch (_: Exception) { true }
+        if (!disabled) return null
+        // Button is disabled. Check if ALL buttons on screen are disabled
+        // (size calculation in progress) vs just this one (zero cache).
+        val root = try { node.parent } catch (_: Exception) { null }
+        if (root != null) {
+            try {
+                val allDisabled = areAllButtonsDisabled(root)
+                try { root.recycle() } catch (_: Exception) {}
+                if (allDisabled) {
+                    listener?.onLog("  [dbg] all buttons disabled, size calc in progress, waiting")
+                    return false // Caller waits and re-checks.
+                }
+            } catch (_: Exception) {
+            }
+        }
+        // Only this button disabled (or can't tell) → zero cache → skip.
+        return true
+    }
+
+    /**
+     * Checks if all clickable buttons in the tree are disabled.
+     * Used to distinguish "calculation in progress" from "zero cache".
+     */
+    private fun areAllButtonsDisabled(root: AccessibilityNodeInfo): Boolean {
+        val deque = ArrayDeque<AccessibilityNodeInfo>()
+        deque.add(root)
+        var foundButton = false
+        while (deque.isNotEmpty()) {
+            val n = deque.removeFirst()
+            try {
+                val className = n.className?.toString() ?: ""
+                if (className.contains("Button", ignoreCase = true) && n.isClickable) {
+                    foundButton = true
+                    if (n.isEnabled) return false
+                }
+                for (i in 0 until n.childCount) {
+                    try { n.getChild(i)?.let { deque.add(it) } } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return foundButton
     }
 
     // ----------------------------------------------------------- dialog stage
@@ -701,9 +888,7 @@ class CacheClearEngine(private val appContext: Context) {
         scope.launch {
             delay(AutomationPolicy.preClickDelayMs(turbo))
             try {
-                withContext(Dispatchers.Main) {
-                    ok.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
+                robustClick(ok)
             } catch (_: Exception) {
             } finally {
                 try { ok.recycle() } catch (_: Exception) {}
@@ -859,7 +1044,38 @@ class CacheClearEngine(private val appContext: Context) {
             } catch (_: Exception) {
             }
         }
-        return clickableAncestorByTextContains(root, text)
+        // Fallback 1: case-insensitive contains on text
+        clickableAncestorByTextContains(root, text)?.let { return it }
+        // Fallback 2: match contentDescription too — vivo/OriginOS puts
+        // button labels in contentDescription (SD Maid OriginOS spec).
+        return clickableAncestorByDescContains(root, text)
+    }
+
+    /**
+     * Like [clickableAncestorByTextContains] but matches
+     * contentDescription. vivo/OriginOS nests the label in the
+     * contentDescription of the clickable container.
+     */
+    private fun clickableAncestorByDescContains(
+        node: AccessibilityNodeInfo,
+        text: String
+    ): AccessibilityNodeInfo? {
+        try {
+            val desc = node.contentDescription?.toString()
+            if (!desc.isNullOrEmpty() &&
+                desc.contains(text, ignoreCase = true)
+            ) {
+                return node.clickableAncestor()
+            }
+            val count = node.childCount
+            for (i in 0 until count) {
+                val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
+                val hit = clickableAncestorByDescContains(child, text)
+                if (hit != null) return hit
+            }
+        } catch (_: Exception) {
+        }
+        return null
     }
 
     private fun clickableAncestorByTextContains(
@@ -971,7 +1187,17 @@ class CacheClearEngine(private val appContext: Context) {
             "storage_settings",
             "storage_use"
         )
-        private val STORAGE_EN_FALLBACK = arrayOf("Storage & cache", "Storage")
+        // English fallbacks. "Internal storage" is what vivo/OriginOS shows
+        // (SD Maid issue #4487, confirmed on vivo devices) — this was the
+        // X STORAGE_MISSING failure: we searched for "Storage" but the row
+        // read "Internal storage".
+        private val STORAGE_EN_FALLBACK = arrayOf(
+            "Storage & cache",
+            "Storage and cache",
+            "Storage",
+            "Internal storage",
+            "Storage usage"
+        )
 
         /** Settings string resource names for the "Clear cache" button. */
         private val CLEAR_CACHE_RES_NAMES = arrayOf(
@@ -996,5 +1222,11 @@ class CacheClearEngine(private val appContext: Context) {
          * the full 30 s package timeout.
          */
         private const val STORAGE_OPEN_TIMEOUT_MS = 8000L
+
+        /** Max ACTION_CLICK attempts before falling back to gesture (bmx666). */
+        private const val CLICK_MAX_TRIES = 3
+
+        /** Delay between click retries. */
+        private const val CLICK_RETRY_DELAY_MS = 300L
     }
 }
