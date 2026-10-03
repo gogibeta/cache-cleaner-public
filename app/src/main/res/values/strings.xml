@@ -58,6 +58,20 @@
     <string name="back">Back</string>
     <string name="remove">Remove</string>
 
+    <!-- Cache threshold filter -->
+    <string name="threshold_title">Hide small caches</string>
+    <string name="threshold_desc">Skip apps with less cache than this</string>
+    <string name="threshold_off">Show all</string>
+    <string name="threshold_100k">100 KB</string>
+    <string name="threshold_1m">1 MB</string>
+    <string name="threshold_5m">5 MB</string>
+    <string name="threshold_10m">10 MB</string>
+
+    <!-- Progress overlay -->
+    <string name="progress_title_cleaning">Cleaning…</string>
+    <string name="progress_of">of</string>
+    <string name="progress_apps_done">%1$d of %2$d apps</string>
+
     <!-- Notifications -->
     <string name="notif_channel_name">Clean runs</string>
     <string name="notif_channel_desc">Progress and results of cache clean runs.</string>
