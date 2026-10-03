@@ -28,6 +28,17 @@ class PrefsStore(private val context: Context) {
          * hidden from the running list until usage events rehabilitate them.
          */
         private val KEY_MI_INVALID = stringSetPreferencesKey("mi_invalid_packs")
+
+        /**
+         * Minimum cache bytes for an app to appear in the list. Apps with
+         * less cache than this are excluded (they have nothing worth
+         * cleaning). Only applied when usage access is granted (otherwise
+         * every app reports 0 cache and the filter would hide everything).
+         */
+        private val KEY_CACHE_THRESHOLD = longPreferencesKey("cache_threshold_bytes")
+
+        /** Default threshold: 1 MB. */
+        const val DEFAULT_CACHE_THRESHOLD_BYTES = 1024L * 1024L
     }
 
     val whitelist: Flow<Set<String>> =
@@ -35,6 +46,17 @@ class PrefsStore(private val context: Context) {
 
     val turbo: Flow<Boolean> =
         context.prefs.data.map { it[KEY_TURBO] ?: true }
+
+    /**
+     * Minimum cache bytes for an app to appear in the list.
+     * Default 1 MB; 0 disables the filter (show everything).
+     */
+    val cacheThresholdBytes: Flow<Long> =
+        context.prefs.data.map { it[KEY_CACHE_THRESHOLD] ?: DEFAULT_CACHE_THRESHOLD_BYTES }
+
+    suspend fun setCacheThresholdBytes(bytes: Long) {
+        context.prefs.edit { it[KEY_CACHE_THRESHOLD] = bytes.coerceAtLeast(0L) }
+    }
 
     /**
      * When the last stop run finished (epoch millis). The reference default
