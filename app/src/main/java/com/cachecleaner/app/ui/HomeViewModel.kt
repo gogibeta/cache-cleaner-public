@@ -10,6 +10,7 @@ import com.cachecleaner.app.data.AppRepository
 import com.cachecleaner.app.data.FileLogger
 import com.cachecleaner.app.data.PrefsStore
 import com.cachecleaner.app.service.RunLog
+import com.cachecleaner.app.service.RunProgress
 import com.cachecleaner.app.service.CacheRunnerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,8 +47,15 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val _turbo = MutableStateFlow(true)
     val turbo: StateFlow<Boolean> = _turbo.asStateFlow()
 
+    /** Minimum cache bytes for an app to appear in the list. */
+    private val _cacheThreshold = MutableStateFlow(PrefsStore.DEFAULT_CACHE_THRESHOLD_BYTES)
+    val cacheThreshold: StateFlow<Long> = _cacheThreshold.asStateFlow()
+
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
+
+    /** Live run progress for the on-screen "X of Y" overlay; null when idle. */
+    val progress: StateFlow<RunProgress.State?> = RunProgress.state
 
     private val _logVersion = MutableStateFlow(0L)
     val logVersion: StateFlow<Long> = _logVersion.asStateFlow()
@@ -85,6 +93,14 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             prefs.turbo.collect { _turbo.value = it }
         }
+        viewModelScope.launch {
+            prefs.cacheThresholdBytes.collect {
+                if (it != _cacheThreshold.value) {
+                    _cacheThreshold.value = it
+                    loadApps()
+                }
+            }
+        }
         refreshAll()
         startMonitors()
     }
@@ -105,7 +121,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _loading.value = true
         try {
             val wl = prefs.whitelist.first()
-            val list = withContext(Dispatchers.IO) { repo.loadApps(wl) }
+            val threshold = prefs.cacheThresholdBytes.first()
+            _cacheThreshold.value = threshold
+            val list = withContext(Dispatchers.IO) { repo.loadApps(wl, threshold) }
             _apps.value = list
             _totalCache.value = list.sumOf { it.cacheBytes }
             // Drop selection entries that no longer exist.
@@ -191,6 +209,11 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setTurbo(enabled: Boolean) {
         viewModelScope.launch { prefs.setTurbo(enabled) }
+    }
+
+    /** Minimum cache bytes for an app to appear in the list (0 = show all). */
+    fun setCacheThreshold(bytes: Long) {
+        viewModelScope.launch { prefs.setCacheThresholdBytes(bytes) }
     }
 
     // ---------- run ----------
