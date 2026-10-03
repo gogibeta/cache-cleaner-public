@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -40,6 +41,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -63,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -76,6 +80,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cachecleaner.app.R
 import com.cachecleaner.app.data.AppEntry
 import com.cachecleaner.app.data.IconCache
+import com.cachecleaner.app.service.RunProgress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -92,6 +97,7 @@ fun HomeScreen(
     val selection by vm.selection.collectAsState()
     val turbo by vm.turbo.collectAsState()
     val running by vm.running.collectAsState()
+    val progress by vm.progress.collectAsState()
     val hasUsage by vm.hasUsageAccess.collectAsState()
     val a11y by vm.a11yEnabled.collectAsState()
     val query by vm.query.collectAsState()
@@ -99,6 +105,7 @@ fun HomeScreen(
     val lastSummary by vm.lastSummary.collectAsState()
     val toastMsg by vm.toastMsg.collectAsState()
     val logLineCount by vm.logLines.collectAsState()
+    val cacheThreshold by vm.cacheThreshold.collectAsState()
     var showLog by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(AppFilter.ALL) }
 
@@ -138,13 +145,17 @@ fun HomeScreen(
             )
         }
     ) { inner ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             item { Spacer(Modifier.height(4.dp)) }
 
             // ---- cache card ----
@@ -180,7 +191,9 @@ fun HomeScreen(
                     canRun = a11y && selection.isNotEmpty(),
                     onTurboChange = vm::setTurbo,
                     onClean = vm::cleanSelected,
-                    onCancel = vm::cancelRun
+                    onCancel = vm::cancelRun,
+                    cacheThreshold = cacheThreshold,
+                    onThresholdChange = vm::setCacheThreshold
                 )
             }
 
@@ -288,6 +301,16 @@ fun HomeScreen(
                 }
             }
             item { Spacer(Modifier.height(80.dp)) }
+            }
+
+            // ---- live run progress overlay ("12 of 65") ----
+            progress?.let { p ->
+                RunProgressOverlay(
+                    progress = p,
+                    title = stringResource(R.string.progress_title_cleaning),
+                    onCancel = vm::cancelRun
+                )
+            }
         }
     }
 }
@@ -394,7 +417,9 @@ private fun RunControls(
     canRun: Boolean,
     onTurboChange: (Boolean) -> Unit,
     onClean: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    cacheThreshold: Long,
+    onThresholdChange: (Long) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -412,6 +437,12 @@ private fun RunControls(
                 }
                 Switch(checked = turbo, onCheckedChange = onTurboChange, enabled = !running)
             }
+            // ---- cache threshold filter ----
+            ThresholdRow(
+                selected = cacheThreshold,
+                enabled = !running,
+                onSelect = onThresholdChange
+            )
             if (running) {
                 Button(
                     onClick = onCancel,
@@ -443,6 +474,134 @@ private fun RunControls(
                         stringResource(R.string.select_hint),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThresholdRow(
+    selected: Long,
+    enabled: Boolean,
+    onSelect: (Long) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        0L to stringResource(R.string.threshold_off),
+        100L * 1024L to stringResource(R.string.threshold_100k),
+        1024L * 1024L to stringResource(R.string.threshold_1m),
+        5L * 1024L * 1024L to stringResource(R.string.threshold_5m),
+        10L * 1024L * 1024L to stringResource(R.string.threshold_10m)
+    )
+    val currentLabel = options.firstOrNull { it.first == selected }?.second
+        ?: stringResource(R.string.threshold_1m)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                stringResource(R.string.threshold_title),
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                stringResource(R.string.threshold_desc),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Box {
+            TextButton(onClick = { expanded = true }, enabled = enabled) {
+                Text(currentLabel)
+                Icon(Icons.Filled.ArrowDropDown, null)
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { (bytes, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            expanded = false
+                            onSelect(bytes)
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen overlay shown during a run: big "12 of 65" count, the app
+ * currently being processed, a progress bar, and a cancel button.
+ */
+@Composable
+private fun RunProgressOverlay(
+    progress: RunProgress.State,
+    title: String,
+    onCancel: () -> Unit
+) {
+    val total = progress.total.coerceAtLeast(1)
+    val done = progress.done.coerceIn(0, total)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.55f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 40.dp)
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(28.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        "$done",
+                        fontSize = 56.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        lineHeight = 56.sp
+                    )
+                    Text(
+                        " ${stringResource(R.string.progress_of)} $total",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+                Text(
+                    progress.currentLabel ?: "",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LinearProgressIndicator(
+                    progress = { done.toFloat() / total.toFloat() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(5.dp)),
+                )
+                TextButton(onClick = onCancel) {
+                    Text(
+                        stringResource(R.string.cancel_run),
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
