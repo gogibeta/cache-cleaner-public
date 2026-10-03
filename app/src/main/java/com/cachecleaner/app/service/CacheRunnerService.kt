@@ -87,6 +87,7 @@ class CacheRunnerService : Service() {
         when (intent?.action) {
             ACTION_CANCEL -> {
                 engine?.cancel()
+                RunProgress.clear()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -127,6 +128,8 @@ class CacheRunnerService : Service() {
             }
 
             override fun onFinished(result: CacheClearEngine.RunResult) {
+                // Run over: drop the progress overlay.
+                RunProgress.clear()
                 scope.launch {
                     val text = getString(
                         R.string.notif_done_text,
@@ -236,6 +239,8 @@ class CacheRunnerService : Service() {
                 pkg
             }
         }
+        // Mirror to the UI overlay.
+        RunProgress.update(done, total, label)
         val text = if (label != null) {
             getString(R.string.notif_progress_text, done + 1, total, label)
         } else {
@@ -327,6 +332,7 @@ class CacheRunnerService : Service() {
             engine?.cancel()
         } catch (_: Exception) {
         }
+        RunProgress.clear()
         scope.cancel()
         super.onDestroy()
     }
