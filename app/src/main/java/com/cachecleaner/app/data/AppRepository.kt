@@ -107,6 +107,9 @@ class AppRepository(private val context: Context) {
      * - user-whitelisted packages
      * - packages still recorded as MIUI-invalid (stop attempt failed and no
      *   usage since the last stop run rehabilitated them)
+     * - apps whose cache is below [cacheThresholdBytes] (only when usage
+     *   access is granted; without it every app reports 0 cache and the
+     *   filter would hide everything)
      *
      * An app counts as "running" exactly like the reference app (AppSleep
      * 2.4, method `v2.c.c`): `PackageManager.getInstalledApplications(0)`
@@ -118,7 +121,7 @@ class AppRepository(private val context: Context) {
      * Per-app cache bytes come from StorageStatsManager (like XCleaner's
      * `queryStatsForUid(...).cacheBytes`); requires usage access, else 0.
      */
-    suspend fun loadApps(userWhitelist: Set<String>): List<AppEntry> {
+    suspend fun loadApps(userWhitelist: Set<String>, cacheThresholdBytes: Long): List<AppEntry> {
         val selfPkg = context.packageName
         val launcherPkg = defaultLauncherPackage()
         val keyboardPkg = activeKeyboardPackage()
@@ -211,8 +214,9 @@ class AppRepository(private val context: Context) {
         }
 
         // ---- usage stats -> last used ----
+        val hasUsage = hasUsageAccess()
         val lastUsedByPkg = mutableMapOf<String, Long>()
-        if (hasUsageAccess()) {
+        if (hasUsage) {
             try {
                 val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
                 val now = System.currentTimeMillis()
@@ -262,12 +266,19 @@ class AppRepository(private val context: Context) {
                 } else {
                     inCandidateSet
                 }
+                // Cache-threshold filter: skip apps with nothing worth
+                // cleaning. Only when we have real cache numbers (usage
+                // access); otherwise every app reports 0 and the filter
+                // would hide the whole list.
+                val cacheBytes = cacheByPkg[pkg] ?: 0L
+                if (hasUsage && cacheBytes < cacheThresholdBytes) continue
+
                 out += AppEntry(
                     packageName = pkg,
                     label = label,
                     isSystem = isSystem,
                     isRunning = isRunning,
-                    cacheBytes = cacheByPkg[pkg] ?: 0L,
+                    cacheBytes = cacheBytes,
                     lastUsed = lastUsedByPkg[pkg] ?: 0L
                 )
             } catch (_: Exception) {
